@@ -82,5 +82,10 @@ you've run `hotspot-up.sh` at least once.
   static IPs (e.g. `192.168.50.11`). Static is recommended over link-local/mDNS
   here because Caddy's resolver may not use mDNS, and static addresses don't
   change across reboots. Adjust the IPs to match your wired setup.
+- **Dashboard port** is `gateway.dashboard_port` in the config (the systemd unit
+  is generated from it). On a dedicated gateway PC use `8000`. On the current
+  `lab3` test box it's `8080`, because `lab3` already runs its own seafront on
+  `:8000` (and `squid1` points at that local seafront so the proxy chain is
+  demonstrable on one machine).
 - **Dashboard bind:** `0.0.0.0` (IPv4) — hotspot clients get IPv4 addresses.
 - **Caddy** listens dual-stack on each `:800N` automatically.

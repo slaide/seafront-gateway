@@ -9,7 +9,14 @@ for s in caddy microscope-dashboard; do
 done
 
 echo; echo "=== listening ports ==="
-ss -tlnp 2>/dev/null | grep -E ':(8000|8001|8002|8003|8004)\b' || echo "(none of 8000-8004 listening)"
+PORTS=$(python3 - "$DIR/config/microscopes.json" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1]))
+ports = [c["gateway"]["dashboard_port"]] + [m["proxy_port"] for m in c["microscopes"]]
+print("|".join(f":{p} " for p in ports))
+PY
+)
+ss -tlnp 2>/dev/null | grep -E "$PORTS" || echo "(no configured ports listening)"
 
 echo; echo "=== hotspot ==="
 IFACE=$(python3 - "$DIR/config/microscopes.json" <<'PY'

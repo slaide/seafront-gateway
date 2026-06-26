@@ -43,14 +43,16 @@ sudo install -m 644 "$DIR/Caddyfile" /etc/caddy/Caddyfile
 
 # --- systemd services ----------------------------------------------------------
 echo "==> installing systemd service"
-sudo install -m 644 "$DIR/systemd/microscope-dashboard.service" \
-  /etc/systemd/system/microscope-dashboard.service
+DASH_PORT=$(python3 -c "import json;print(json.load(open('$DIR/config/microscopes.json'))['gateway']['dashboard_port'])")
+sed "s/__DASHBOARD_PORT__/$DASH_PORT/" "$DIR/systemd/microscope-dashboard.service" \
+  | sudo tee /etc/systemd/system/microscope-dashboard.service >/dev/null
 sudo systemctl daemon-reload
 sudo systemctl enable --now caddy
 sudo systemctl restart caddy
-sudo systemctl enable --now microscope-dashboard
+sudo systemctl enable microscope-dashboard
+sudo systemctl restart microscope-dashboard
 
 echo
-echo "==> done. dashboard: http://$(hostname).local:8000  (and http://<this-host-ip>:8000)"
+echo "==> done. dashboard: http://$(hostname).local:$DASH_PORT  (and http://<this-host-ip>:$DASH_PORT)"
 echo "    proxies: $(python3 -c "import json;print(', '.join(str(m['proxy_port']) for m in json.load(open('$DIR/config/microscopes.json'))['microscopes']))")"
 echo "    start the Wi-Fi hotspot when ready:  scripts/hotspot-up.sh"

@@ -18,5 +18,5 @@ else
     | ssh "$TARGET" "mkdir -p $DEST && tar -C $DEST -xz"
 fi
 
-echo "==> running installer on $TARGET"
-ssh "$TARGET" "cd $DEST && bash scripts/install.sh"
+echo "==> running installer on $TARGET (sudo will prompt for the gateway password)"
+ssh -t "$TARGET" "cd $DEST && bash scripts/install.sh"

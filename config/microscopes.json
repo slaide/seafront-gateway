@@ -1,7 +1,7 @@
 {
-  "_comment": "Single source of truth for the gateway. Edit this, then run scripts/apply-config.sh. Hosts are the PLANNED static IPs of the wired backbone; replace with real addresses as microscope PCs are added.",
+  "_comment": "Single source of truth for the gateway. Edit this, then run scripts/apply-config.sh (or redeploy). NOTE: this currently reflects the lab3 single-box test, where lab3 runs BOTH the gateway AND a local seafront on :8000 — so the dashboard uses 8080 and squid1 points at the local seafront. On a DEDICATED gateway PC, set dashboard_port back to 8000 and point each microscope at its real backbone IP (e.g. 192.168.50.11).",
   "gateway": {
-    "dashboard_port": 8000,
+    "dashboard_port": 8080,
     "hotspot": {
       "ssid": "microscopes",
       "password": "microscope-lan",
@@ -9,9 +9,9 @@
     }
   },
   "microscopes": [
-    { "name": "squid1", "host": "192.168.50.11", "seafront_port": 8000, "proxy_port": 8001 },
-    { "name": "squid2", "host": "192.168.50.12", "seafront_port": 8000, "proxy_port": 8002 },
-    { "name": "squid3", "host": "192.168.50.13", "seafront_port": 8000, "proxy_port": 8003 },
-    { "name": "squid4", "host": "192.168.50.14", "seafront_port": 8000, "proxy_port": 8004 }
+    { "name": "squid1", "host": "127.0.0.1",     "seafront_port": 8000, "proxy_port": 8001, "_note": "lab3's own local seafront" },
+    { "name": "squid2", "host": "192.168.50.12", "seafront_port": 8000, "proxy_port": 8002, "_note": "placeholder - add real PC" },
+    { "name": "squid3", "host": "192.168.50.13", "seafront_port": 8000, "proxy_port": 8003, "_note": "placeholder - add real PC" },
+    { "name": "squid4", "host": "192.168.50.14", "seafront_port": 8000, "proxy_port": 8004, "_note": "placeholder - add real PC" }
   ]
 }
