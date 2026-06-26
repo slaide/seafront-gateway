@@ -1,0 +1,17 @@
+{
+  "_comment": "Single source of truth for the gateway. Edit this, then run scripts/apply-config.sh. Hosts are the PLANNED static IPs of the wired backbone; replace with real addresses as microscope PCs are added.",
+  "gateway": {
+    "dashboard_port": 8000,
+    "hotspot": {
+      "ssid": "microscopes",
+      "password": "microscope-lan",
+      "wifi_iface": "wlp3s0"
+    }
+  },
+  "microscopes": [
+    { "name": "squid1", "host": "192.168.50.11", "seafront_port": 8000, "proxy_port": 8001 },
+    { "name": "squid2", "host": "192.168.50.12", "seafront_port": 8000, "proxy_port": 8002 },
+    { "name": "squid3", "host": "192.168.50.13", "seafront_port": 8000, "proxy_port": 8003 },
+    { "name": "squid4", "host": "192.168.50.14", "seafront_port": 8000, "proxy_port": 8004 }
+  ]
+}

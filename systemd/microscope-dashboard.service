@@ -1,0 +1,16 @@
+[Unit]
+Description=Microscope gateway dashboard (FastAPI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pharmbio
+WorkingDirectory=/home/pharmbio/microscope-gateway/dashboard
+# Bind 0.0.0.0 (IPv4): Wi-Fi hotspot clients get IPv4 addresses from NetworkManager.
+ExecStart=/home/pharmbio/microscope-gateway/dashboard/.venv/bin/uvicorn app:app --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
