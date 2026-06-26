@@ -1,9 +1,25 @@
 # Microscope gateway
 
-Central access point for the microscope LAN. One PC (the **gateway**) hosts a
-Wi-Fi hotspot; you join it from a laptop/phone, open a single dashboard, and
-reach every microscope through it. The microscope PCs are never contacted
-directly by clients.
+Central access point for the microscope LAN: one PC hosts a Wi-Fi hotspot, a
+dashboard, and a Caddy reverse proxy that forwards one port per microscope to its
+seafront server. `config/microscopes.json` is the single source of truth — edit
+it, then run `scripts/apply-config.sh`.
+
+| Component | Port | Purpose |
+|---|---|---|
+| Dashboard (FastAPI) | `dashboard_port` (8000; 8080 on lab3) | landing page + per-microscope status |
+| Caddy reverse proxy | 8001…800N | `gateway:800N` → `squidN:8000` (HTTP + WebSocket) |
+| Wi-Fi hotspot | — | clients join here to reach the gateway |
+
+| Task | Command (run in the project dir) |
+|---|---|
+| Install / bring up | `scripts/install.sh` (on gateway) · `scripts/deploy.sh` (from dev machine) |
+| Add / change a microscope | edit `config/microscopes.json` → `scripts/apply-config.sh` |
+| Start / stop services | `scripts/start.sh` · `scripts/stop.sh` |
+| Start / stop hotspot | `scripts/hotspot-up.sh` · `scripts/hotspot-down.sh` |
+| Status / logs | `scripts/status.sh` · `journalctl -u caddy -u microscope-dashboard -f` |
+
+## How it works
 
 ```
    Wi-Fi hotspot ── clients join here
@@ -20,11 +36,11 @@ directly by clients.
 Two programs run in parallel on the gateway:
 - **Caddy** — reverse-proxies `gateway:800N` → `squidN:8000`. Root→root, so
   seafront's HTML/API/WebSocket work with no rewriting.
-- **dashboard/** — a FastAPI app on `:8000` serving the landing page; it
-  health-checks each microscope on demand and links to its proxy port.
+- **dashboard/** — a FastAPI app serving the landing page; it health-checks each
+  microscope on demand and links to its proxy port.
 
-`config/microscopes.json` is the **single source of truth** (microscope list +
-hotspot settings). The Caddyfile is generated from it.
+The Caddyfile and the dashboard are both generated/driven from
+`config/microscopes.json`.
 
 ## Bring it up
 
@@ -54,16 +70,6 @@ scripts/hotspot-up.sh     # ⚠ puts Wi-Fi into AP mode → no Wi-Fi internet wh
 
 Open the dashboard at `http://<gateway>:8000` (e.g. `http://lab3.local:8000`
 over the wired link, or the hotspot IP printed by `hotspot-up.sh`).
-
-## Day-to-day
-
-| Task | Command |
-|---|---|
-| Add/change a microscope | edit `config/microscopes.json`, then `scripts/apply-config.sh` |
-| Start / stop services | `scripts/start.sh` / `scripts/stop.sh` |
-| Start / stop hotspot | `scripts/hotspot-up.sh` / `scripts/hotspot-down.sh` |
-| Check what's running | `scripts/status.sh` |
-| Logs | `journalctl -u caddy -f` · `journalctl -u microscope-dashboard -f` |
 
 Everything auto-starts on boot (`systemd`); the hotspot reconnects on boot once
 you've run `hotspot-up.sh` at least once.
