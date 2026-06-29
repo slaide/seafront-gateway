@@ -53,7 +53,15 @@ link-local). These are the `<name> <ip>` you pass to `setup-microscope-pc.sh`:
 | `lab3` | `192.168.50.13` | microscope PC (also temp gateway until `squidway` exists) |
 | `lab4` | `192.168.50.14` | microscope PC |
 
-(A dev/admin laptop can take e.g. `192.168.50.50` to reach the backbone directly.)
+To reach the boxes by backbone IP from an admin/dev machine, give it an address on
+this subnet (without it you can only reach them via `labN.local` over IPv6 link-local):
+```bash
+# temporary (gone on reboot):
+sudo ip addr add 192.168.50.50/24 dev <wired-iface>
+# persistent, NetworkManager (adds to the existing profile, keeps other addresses):
+sudo nmcli connection modify "<profile>" +ipv4.addresses 192.168.50.50/24
+sudo nmcli connection up "<profile>"
+```
 
 ## Day-to-day
 
