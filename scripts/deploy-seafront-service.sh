@@ -16,7 +16,7 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 PROFILE=squid
-SEAFRONT_DIR='~/Documents/seafront'
+SEAFRONT_DIR=''     # empty => each box auto-detects its own checkout (paths differ per box)
 PORT=8000
 USER_NAME="${MICROLAN_USER:-pharmbio}"
 ENABLE_FLAG=""
@@ -68,7 +68,8 @@ for i in "${!HOSTS[@]}"; do
   if ! SCP "$REPO/scripts/install-seafront-service.sh" "$tgt:/tmp/install-seafront-service.sh" >/dev/null 2>&1; then
     echo "  !! scp failed — host unreachable or ssh auth wrong (run setup-microscope-pc.sh there first?)"; fail=1; continue
   fi
-  out=$(SSH "$tgt" "$SUDO bash /tmp/install-seafront-service.sh $PROFILE --dir $SEAFRONT_DIR --port $PORT $ENABLE_FLAG" 2>&1) && rc=0 || rc=$?
+  DIRARG=""; [ -n "$SEAFRONT_DIR" ] && DIRARG="--dir $SEAFRONT_DIR"
+  out=$(SSH "$tgt" "$SUDO bash /tmp/install-seafront-service.sh $PROFILE $DIRARG --port $PORT $ENABLE_FLAG" 2>&1) && rc=0 || rc=$?
   echo "$out" | grep -vE "$QUIET" | sed 's/^/  /'
   if [ "$rc" = 0 ]; then echo "  ok: $label"; else echo "  !! FAILED: $label (rc=$rc)"; fail=1; fi
 done

@@ -30,9 +30,22 @@ done
 RUN_USER="${SUDO_USER:-$USER}"
 RUN_HOME=$(getent passwd "$RUN_USER" | cut -d: -f6)
 [ -n "$RUN_HOME" ] || { echo "cannot resolve home for $RUN_USER"; exit 1; }
-DIR="${DIR:-$RUN_HOME/Desktop/seafront}"
-# expand a leading ~ — systemd WorkingDirectory needs an absolute path.
-case "$DIR" in "~/"*) DIR="$RUN_HOME/${DIR#\~/}";; "~") DIR="$RUN_HOME";; esac
+# Resolve the seafront checkout. Explicit --dir wins (expand a leading ~, since
+# systemd WorkingDirectory needs an absolute path); otherwise auto-detect under
+# the user's home — the path differs per box (~/Desktop, ~/Documents, …).
+if [ -n "$DIR" ]; then
+  case "$DIR" in "~/"*) DIR="$RUN_HOME/${DIR#\~/}";; "~") DIR="$RUN_HOME";; esac
+else
+  mapfile -t CANDS < <(find "$RUN_HOME" -maxdepth 4 -name pyproject.toml 2>/dev/null \
+    | xargs -r grep -l 'name = "seafront"' 2>/dev/null | xargs -r -n1 dirname | sort -u)
+  if [ "${#CANDS[@]}" -eq 1 ]; then
+    DIR="${CANDS[0]}"; echo "==> auto-detected seafront checkout: $DIR"
+  elif [ "${#CANDS[@]}" -eq 0 ]; then
+    echo "no seafront checkout found under $RUN_HOME — pass --dir <path>"; exit 1
+  else
+    echo "multiple seafront checkouts found — pass --dir to choose one:"; printf '   %s\n' "${CANDS[@]}"; exit 1
+  fi
+fi
 
 # Locate uv (user-level install or on PATH).
 UV="$RUN_HOME/.local/bin/uv"

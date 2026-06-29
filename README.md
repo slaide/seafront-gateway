@@ -17,15 +17,15 @@ A fresh box defaults to DHCP on the wired NIC and hangs at "setting network addr
 on our DHCP-less switch (see *Wired NIC hangs* below), so it's invisible on the wire
 until the wired NIC is pinned to a static IP. Sitting at the box (`<profile>` is
 seafront's hardware profile, e.g. `squid` — same on every box; `<name>`/`<ip>` are this
-box's identity, e.g. `lab1 192.168.50.11`; `<dir>` is the seafront checkout, which
-varies per box — `~/Desktop/seafront`, `~/Documents/seafront`, …):
+box's identity, e.g. `lab1 192.168.50.11`. The seafront checkout is auto-detected under
+the user's home; pass `--dir <path>` only if a box has more than one):
 ```bash
-bash scripts/setup-microscope-pc.sh      <name> <ip>             # net: hostname, mDNS, static IP, firewall
-git -C <dir> pull                                                # seafront MUST support --host (old checkouts don't)
-bash scripts/install-seafront-service.sh <profile> --dir <dir>   # seafront as a boot service
+bash scripts/setup-microscope-pc.sh      <name> <ip>   # net: hostname, mDNS, static IP, firewall
+git -C <seafront-checkout> pull                        # seafront MUST support --host (old checkouts don't)
+bash scripts/install-seafront-service.sh <profile>     # seafront as a boot service (auto-finds the checkout)
 ```
 The `git pull` matters: a checkout too old for the `--host` flag makes the service
-crash-loop. `install-seafront-service.sh` now refuses to install against such a checkout
+crash-loop. `install-seafront-service.sh` refuses to install against such a checkout
 and tells you to pull first.
 then back on the gateway:
 ```bash
@@ -35,7 +35,7 @@ bash scripts/register-microscope.sh <name> <ip>                  # add to proxy 
 Once a box is network-reachable, the seafront-service step can be re-run for the **whole
 fleet at once** from the gateway instead of per box (no keys yet → pass the shared password):
 ```bash
-MICROLAN_PASS=<password> bash scripts/deploy-seafront-service.sh --profile squid --dir ~/Documents/seafront
+MICROLAN_PASS=<password> bash scripts/deploy-seafront-service.sh --profile squid
 ```
 
 Open the dashboard at `http://<gateway>:8000`. Done.
