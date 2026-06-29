@@ -1,23 +1,71 @@
 # Microscope gateway
 
-Central access point for the microscope LAN: one PC hosts a Wi-Fi hotspot, a
-dashboard, and a Caddy reverse proxy that forwards one port per microscope to its
-seafront server. `config/microscopes.json` is the single source of truth — edit
-it, then run `scripts/apply-config.sh`.
+One gateway PC hosts a Wi-Fi hotspot + dashboard + Caddy reverse proxy; clients
+join the hotspot and reach every microscope through it. `config/microscopes.json`
+is the single source of truth.
 
-| Component | Port | Purpose |
+## Install
+
+**Gateway PC** (once):
+```bash
+bash scripts/install.sh        # uv + Caddy + dashboard, as boot services
+bash scripts/hotspot-up.sh     # start Wi-Fi AP (⚠ kills this PC's Wi-Fi internet)
+```
+
+**Each microscope PC** — ⚠ **run the first step at the keyboard, not over the wire.**
+A fresh box defaults to DHCP on the wired NIC and hangs at "setting network address"
+on our DHCP-less switch (see *Wired NIC hangs* below), so it's invisible on the wire
+until the wired NIC is pinned to a static IP. Sitting at the box (`<profile>` is
+seafront's hardware profile, e.g. `squid` — same on every box; `<name>`/`<ip>` are this
+box's identity, e.g. `lab1 192.168.50.11`; `<dir>` is the seafront checkout, which
+varies per box — `~/Desktop/seafront`, `~/Documents/seafront`, …):
+```bash
+bash scripts/setup-microscope-pc.sh      <name> <ip>             # net: hostname, mDNS, static IP, firewall
+git -C <dir> pull                                                # seafront MUST support --host (old checkouts don't)
+bash scripts/install-seafront-service.sh <profile> --dir <dir>   # seafront as a boot service
+```
+The `git pull` matters: a checkout too old for the `--host` flag makes the service
+crash-loop. `install-seafront-service.sh` now refuses to install against such a checkout
+and tells you to pull first.
+then back on the gateway:
+```bash
+bash scripts/register-microscope.sh <name> <ip>                  # add to proxy + dashboard
+```
+
+Once a box is network-reachable, the seafront-service step can be re-run for the **whole
+fleet at once** from the gateway instead of per box (no keys yet → pass the shared password):
+```bash
+MICROLAN_PASS=<password> bash scripts/deploy-seafront-service.sh --profile squid --dir ~/Documents/seafront
+```
+
+Open the dashboard at `http://<gateway>:8000`. Done.
+
+## Addressing
+
+Static `192.168.50.0/24` on the wired backbone (no DHCP — addresses are fixed, not
+link-local). These are the `<name> <ip>` you pass to `setup-microscope-pc.sh`:
+
+| Name | IPv4 | Role |
 |---|---|---|
-| Dashboard (FastAPI) | `dashboard_port` (8000; 8080 on lab3) | landing page + per-microscope status |
-| Caddy reverse proxy | 8001…800N | `gateway:800N` → `squidN:8000` (HTTP + WebSocket) |
-| Wi-Fi hotspot | — | clients join here to reach the gateway |
+| `squidway` | `192.168.50.1` | gateway (dedicated PC) — *future* |
+| `lab1` | `192.168.50.11` | microscope PC |
+| `lab2` | `192.168.50.12` | microscope PC |
+| `lab3` | `192.168.50.13` | microscope PC (also temp gateway until `squidway` exists) |
+| `lab4` | `192.168.50.14` | microscope PC |
 
-| Task | Command (run in the project dir) |
+(A dev/admin laptop can take e.g. `192.168.50.50` to reach the backbone directly.)
+
+## Day-to-day
+
+| Task | Command |
 |---|---|
-| Install / bring up | `scripts/install.sh` (on gateway) · `scripts/deploy.sh` (from dev machine) |
-| Add / change a microscope | edit `config/microscopes.json` → `scripts/apply-config.sh` |
 | Start / stop services | `scripts/start.sh` · `scripts/stop.sh` |
 | Start / stop hotspot | `scripts/hotspot-up.sh` · `scripts/hotspot-down.sh` |
-| Status / logs | `scripts/status.sh` · `journalctl -u caddy -u microscope-dashboard -f` |
+| Status | `scripts/status.sh` |
+| Logs | `journalctl -u caddy -u microscope-dashboard -f` (gateway) · `journalctl -u seafront -f` (a scope) |
+| Change config by hand | edit `config/microscopes.json` → `scripts/apply-config.sh` |
+
+---
 
 ## How it works
 
@@ -25,73 +73,69 @@ it, then run `scripts/apply-config.sh`.
    Wi-Fi hotspot ── clients join here
         │
    ┌────┴─────┐   :8000  dashboard (FastAPI)   ← this project
-   │ Gateway  │   :8001 → squid1:8000  ┐
-   │   PC     │   :8002 → squid2:8000  │  Caddy reverse proxy
-   └────┬─────┘   :8003 → squid3:8000  │  (root→root, WebSockets included)
-     switch       :8004 → squid4:8000  ┘
+   │ Gateway  │   :8001 → lab1:8000  ┐
+   │ squidway │   :8002 → lab2:8000  │  Caddy reverse proxy
+   └────┬─────┘   :8003 → lab3:8000  │  (root→root, WebSockets included)
+     switch       :8004 → lab4:8000  ┘
    ┌──┬──┬──┬──┐
-  PC1 …        each runs:  seafront --host :: --port 8000
+  lab1 …       each runs:  seafront --host :: --port 8000  (systemd)
 ```
 
-Two programs run in parallel on the gateway:
-- **Caddy** — reverse-proxies `gateway:800N` → `squidN:8000`. Root→root, so
+Two programs run on the gateway, both driven from `config/microscopes.json`:
+- **Caddy** — reverse-proxies `gateway:800N` → `labN:8000`, root→root, so
   seafront's HTML/API/WebSocket work with no rewriting.
-- **dashboard/** — a FastAPI app serving the landing page; it health-checks each
-  microscope on demand and links to its proxy port.
+- **dashboard/** — FastAPI landing page; health-checks each microscope on demand
+  and links to its proxy port.
 
-The Caddyfile and the dashboard are both generated/driven from
-`config/microscopes.json`.
+## The scripts
 
-## Bring it up
+| Script | Runs on | Does |
+|---|---|---|
+| `install.sh` | gateway | uv + Caddy + dashboard venv + both systemd services. Idempotent. |
+| `deploy.sh [user@host]` | dev machine | rsync repo to the gateway + run `install.sh` there. |
+| `hotspot-up.sh` / `hotspot-down.sh` | gateway | start / stop the Wi-Fi AP. |
+| `setup-microscope-pc.sh <name> <ip>` | microscope PC (keyboard) | one-shot bring-up: hostname, ssh+avahi (mDNS), static IP (cures the DHCP hang), firewall. Idempotent. |
+| `install-seafront-service.sh <profile> [--dir D] [--port P] [--no-enable]` | microscope PC | seafront as a systemd service (survives logout + reboot, restarts on crash). |
+| `deploy-seafront-service.sh [--profile P] [--dir D] [host ...]` | gateway | fan out `install-seafront-service.sh` to the whole fleet over SSH. |
+| `register-microscope.sh <name> <ip> [proxy_port] [seafront_port]` | gateway | add to `microscopes.json` (auto-picks proxy port) + reload proxy/dashboard. |
+| `apply-config.sh` | gateway | regenerate Caddyfile from config + reload services. |
 
-### First time, from your dev machine
+Notes on the per-PC scripts:
+- `setup-microscope-pc.sh` handles both network backends automatically: **NetworkManager**
+  (Ubuntu Desktop / Arch) and **netplan + systemd-networkd** (Ubuntu Server, where the NIC
+  shows as "unmanaged" and there is no "Wired connection 1" — it writes
+  `/etc/netplan/60-microscope-lan.yaml` instead). Either way it pins a **static** backbone
+  IP — Caddy's resolver may bypass mDNS, so `.local` names aren't reliable as proxy
+  upstreams. `--dir` exists because the seafront checkout path differs per machine.
+- Both per-PC scripts need `sudo` (a password unless the PC has passwordless sudo),
+  so run them in an interactive session on each PC, or set up passwordless sudo to
+  loop over hosts non-interactively.
 
-```bash
-scripts/deploy.sh                 # rsync to pharmbio@lab3.local + run installer
-# or target another host:  scripts/deploy.sh user@host
-```
+## Wired NIC hangs at "setting network address" (every fresh box)
 
-### Or directly on the gateway PC
+The switch has **no DHCP server** (deliberate — it's an isolated wired island). But a
+stock install defaults the wired NIC to DHCP (`ipv4.method = auto`), so on this switch
+it retries forever, sits in `connecting (getting IP configuration)` / "setting network
+address", and eventually NetworkManager **drops the interface** — the box then vanishes
+from the wire and (if it blocks boot) may hang on startup. Its Wi-Fi internet is
+unaffected.
 
-```bash
-git clone <this repo>  ~/microscope-gateway   # (or scp it over)
-cd ~/microscope-gateway
-bash scripts/install.sh
-```
+The cure is to take the wired NIC off DHCP — which `setup-microscope-pc.sh` does (it pins
+a static IP). The catch: until it runs, the box is unreachable over the wire, so **the
+first run must be at the keyboard** — that one run also installs ssh, so everything after
+is remote.
 
-`install.sh` installs `uv` + Caddy, builds the dashboard venv, generates the
-Caddyfile, and installs + enables both `systemd` services. It is idempotent.
-
-Then start the hotspot when you actually want clients to connect:
-
-```bash
-scripts/hotspot-up.sh     # ⚠ puts Wi-Fi into AP mode → no Wi-Fi internet while up
-```
-
-Open the dashboard at `http://<gateway>:8000` (e.g. `http://lab3.local:8000`
-over the wired link, or the hotspot IP printed by `hotspot-up.sh`).
-
-Everything auto-starts on boot (`systemd`); the hotspot reconnects on boot once
-you've run `hotspot-up.sh` at least once.
-
-## Adding a microscope PC
-
-1. Give the new microscope PC a static IP on the wired backbone (see
-   `MICROSCOPE_NETWORK.md` in the seafront repo) and run seafront with
-   `--host ::`.
-2. Add an entry to `config/microscopes.json` (name, host, `proxy_port`).
-3. `scripts/apply-config.sh`.
+(netplan/systemd-networkd boxes: the equivalent is `link-local: [ipv4, ipv6]` +
+`optional: true` — see `MICROSCOPE_NETWORK.md` §5b in the seafront repo.)
 
 ## Notes
 
-- **Backbone addressing:** the proxy upstreams in `config/microscopes.json` are
-  static IPs (e.g. `192.168.50.11`). Static is recommended over link-local/mDNS
-  here because Caddy's resolver may not use mDNS, and static addresses don't
-  change across reboots. Adjust the IPs to match your wired setup.
-- **Dashboard port** is `gateway.dashboard_port` in the config (the systemd unit
-  is generated from it). On a dedicated gateway PC use `8000`. On the current
-  `lab3` test box it's `8080`, because `lab3` already runs its own seafront on
-  `:8000` (and `squid1` points at that local seafront so the proxy chain is
-  demonstrable on one machine).
-- **Dashboard bind:** `0.0.0.0` (IPv4) — hotspot clients get IPv4 addresses.
-- **Caddy** listens dual-stack on each `:800N` automatically.
+- **Backbone addressing:** proxy upstreams in `config/microscopes.json` are static
+  IPs (e.g. `192.168.50.11`–`.14`). Adjust to match your wiring.
+- **Dashboard port** is `gateway.dashboard_port` in the config; the systemd unit is
+  generated from it. Use `8000` on a dedicated gateway.
+- **lab3 test box:** `lab3` doubles as a microscope PC (its own seafront on `:8000`),
+  so its dashboard runs on `:8080` and `squid1` points at `127.0.0.1`. On a dedicated
+  gateway, set `dashboard_port` back to `8000` and use real backbone IPs.
+- **Binds:** dashboard on `0.0.0.0` (hotspot clients get IPv4); Caddy dual-stack on
+  each `:800N` automatically.
