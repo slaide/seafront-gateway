@@ -19,15 +19,23 @@ import asyncio
 import json
 import os
 import pathlib
+import re
+import tempfile
+import time
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CONFIG = json.loads((ROOT / "config" / "microscopes.json").read_text())
 MICROSCOPES = CONFIG["microscopes"]
 BY_NAME = {m["name"]: m for m in MICROSCOPES}
+
+DEPLOY_SCRIPT = ROOT / "scripts" / "deploy-seafront.sh"
+DEPLOY_LOG = ROOT / "deploy.log"
+# Single deploy at a time. `proc` is set while running; `rc` holds the last exit code.
+DEPLOY: dict = {"proc": None, "rc": None, "version": None, "started": 0.0}
 
 # SSH identity the dashboard uses to reach the scopes (created by
 # scripts/setup-fleet-control.sh). Overridable via env for testing.
@@ -104,6 +112,48 @@ async def _ssh(name: str, argv: list[str], timeout: float = 20.0) -> tuple[int, 
 SYSTEMCTL = "/usr/bin/systemctl"
 
 
+# --- version reporting: gateway storage + each box ----------------------------
+GATEWAY_SRC = pathlib.Path.home() / "seafront-dist"   # what deploy-seafront.sh stages
+BOX_SRC = "~/seafront-app"                            # where it lands on a box
+
+
+def _parse_version(pyproject_text: str) -> str | None:
+    m = re.search(r'^version\s*=\s*"([^"]+)"', pyproject_text, re.M)
+    return m.group(1) if m else None
+
+
+def _gateway_version() -> dict:
+    """seafront version staged on the gateway (version string + source/commit id)."""
+    pj = GATEWAY_SRC / "pyproject.toml"
+    dv = GATEWAY_SRC / "DEPLOYED_VERSION"
+    return {
+        "version": _parse_version(pj.read_text()) if pj.exists() else None,
+        "source": dv.read_text().strip().splitlines()[-1] if dv.exists() and dv.read_text().strip() else None,
+    }
+
+
+async def _box_version(name: str) -> dict:
+    # One argv element: ssh space-joins argv and the remote shell re-parses, so a
+    # multi-part ["sh","-c",...] loses its quoting — pass the whole line as one string.
+    rc, out, _ = await _ssh(name, [
+        f"cat {BOX_SRC}/DEPLOYED_VERSION 2>/dev/null; echo ':::'; "
+        f"grep -m1 -E '^version' {BOX_SRC}/pyproject.toml 2>/dev/null",
+    ], timeout=8.0)
+    source = version = None
+    if rc == 0 and ":::" in out:
+        s, _, v = out.partition(":::")
+        source = s.strip() or None
+        m = re.search(r'"([^"]+)"', v)
+        version = m.group(1) if m else None
+    return {"name": name, "version": version, "source": source}
+
+
+@app.get("/api/versions")
+async def versions() -> JSONResponse:
+    boxes = await asyncio.gather(*[_box_version(m["name"]) for m in MICROSCOPES])
+    return JSONResponse({"gateway": _gateway_version(), "boxes": list(boxes)})
+
+
 @app.get("/api/microscopes")
 async def microscopes() -> JSONResponse:
     return JSONResponse(MICROSCOPES)
@@ -151,6 +201,82 @@ async def get_logs(name: str, lines: int = 200) -> str:
     return out
 
 
+DEFAULT_ZIP_URL = "https://github.com/slaide/seafront/archive/refs/heads/main.zip"
+
+
+async def _run_deploy(args: list[str], cleanup: str | None = None) -> None:
+    """Background task: run deploy-seafront.sh with `args`, streaming to DEPLOY_LOG."""
+    with open(DEPLOY_LOG, "wb") as log:
+        proc = await asyncio.create_subprocess_exec(
+            "bash", str(DEPLOY_SCRIPT), *args,
+            stdout=log, stderr=asyncio.subprocess.STDOUT, cwd=str(ROOT),
+        )
+        DEPLOY["proc"] = proc
+        await proc.wait()
+    DEPLOY["rc"] = proc.returncode
+    DEPLOY["proc"] = None
+    if cleanup:
+        try:
+            os.unlink(cleanup)
+        except OSError:
+            pass
+
+
+@app.post("/api/seafront/stage")
+async def seafront_stage(
+    file: UploadFile | None = File(None),
+    url: str | None = Form(None),
+) -> JSONResponse:
+    """STAGE a new seafront version onto the GATEWAY only — no box is touched.
+    Source is either a zip URL the gateway fetches (browsers can't fetch GitHub
+    cross-origin due to CORS, so the gateway does it) or an uploaded bundle/zip.
+    Flush to each box separately via /api/scope/{name}/update."""
+    if DEPLOY["proc"] is not None:
+        raise HTTPException(409, "a stage/update is already running")
+    if url is not None:
+        target = url.strip() or DEFAULT_ZIP_URL
+        DEPLOY.update(rc=None, version=target, started=time.time())
+        DEPLOY_LOG.write_text(f"gateway staging from {target}…\n")
+        asyncio.create_task(_run_deploy(["--stage-only", "--url", target]))
+        return JSONResponse({"ok": True, "message": f"staging from {target}"})
+    name = file.filename or "" if file is not None else ""
+    if name.endswith((".tar", ".tar.zst", ".tzst", ".tar.gz", ".tgz")):
+        mode = "--bundle"           # self-contained offline bundle (code + wheels + uv)
+    elif name.endswith(".zip"):
+        mode = "--zip"              # code-only zip (gateway builds deps → needs internet)
+    else:
+        raise HTTPException(400, "provide an offline bundle (.tar/.tar.zst), a code .zip, or a url")
+    fd, up_path = tempfile.mkstemp(suffix="-" + name, prefix="seafront-upload-")
+    with os.fdopen(fd, "wb") as f:
+        while chunk := await file.read(1 << 20):
+            f.write(chunk)
+    DEPLOY.update(rc=None, version=name, started=time.time())
+    DEPLOY_LOG.write_text(f"uploaded {name}, staging on the gateway…\n")
+    asyncio.create_task(_run_deploy(["--stage-only", mode, up_path], cleanup=up_path))
+    return JSONResponse({"ok": True, "message": f"staging {name}"})
+
+
+@app.post("/api/scope/{name}/update")
+async def scope_update(name: str) -> JSONResponse:
+    """Flush (push) the gateway's currently-staged seafront to ONE box. Does not
+    restart it — a running acquisition keeps its old code until you restart."""
+    if name not in BY_NAME:
+        raise HTTPException(404, f"unknown microscope: {name}")
+    if DEPLOY["proc"] is not None:
+        raise HTTPException(409, "a stage/update is already running")
+    DEPLOY.update(rc=None, version=f"push→{name}", started=time.time())
+    DEPLOY_LOG.write_text(f"flushing gateway's staged seafront to {name}…\n")
+    asyncio.create_task(_run_deploy(["--push-only", name]))
+    return JSONResponse({"ok": True, "message": f"updating {name}"})
+
+
+@app.get("/api/seafront/deploy/log")
+async def seafront_deploy_log() -> JSONResponse:
+    running = DEPLOY["proc"] is not None
+    log = DEPLOY_LOG.read_text() if DEPLOY_LOG.exists() else ""
+    return JSONResponse({"running": running, "rc": DEPLOY["rc"], "version": DEPLOY["version"], "log": log})
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index() -> str:
     return HTML
@@ -170,6 +296,13 @@ HTML = """<!doctype html>
   header { padding: 28px 24px 8px; }
   h1 { margin: 0; font-size: 1.4rem; letter-spacing: .02em; }
   .sub { color: #8b949e; font-size: .9rem; margin-top: 4px; }
+  .deploy { margin-top: 14px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+            font-size: .85rem; }
+  .deploy label { color: #8b949e; }
+  .deploy .hint { color: #6e7681; font-size: .78rem; }
+  .deploy .sep { color: #6e7681; }
+  .stale { color: #d29922; }
+  button.hot { border-color: #bb8009; color: #f0c674; }
   .grid { display: grid; gap: 16px; padding: 24px;
           grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
   .card { background: #161b22; border: 1px solid #30363d; border-radius: 12px;
@@ -210,6 +343,15 @@ HTML = """<!doctype html>
 <header>
   <h1>🔬 Microscope Gateway</h1>
   <div class="sub">Fleet status &amp; maintenance. Auto-refreshing every 5s.</div>
+  <div class="deploy">
+    <label>Gateway storage:</label>
+    <strong id="gwver">…</strong>
+    <span class="sep">— stage a new version:</span>
+    <button onclick="stageFromGitHub()">from GitHub (dev)</button>
+    <input type="file" id="zipfile" accept=".tar,.tar.zst,.tzst,.tgz,.tar.gz,.zip">
+    <button onclick="stageUpload()">from bundle/zip</button>
+    <span class="hint">staging updates the gateway only — flush to each microscope with its Update button</span>
+  </div>
 </header>
 <div class="grid" id="grid"></div>
 <footer id="foot">loading…</footer>
@@ -247,6 +389,61 @@ async function act(name, action, confirmMsg) {
   } catch (e) { toast(`${name}: ${action} failed — ${e}`); }
   setTimeout(refresh, 1500);
 }
+let VERS = {gateway: {}, boxes: {}};
+function fmtVer(o) { return o && o.version ? (o.version + (o.source ? ' · ' + o.source : '')) : null; }
+async function fetchVersions() {
+  try {
+    const v = await (await fetch('/api/versions')).json();
+    VERS.gateway = v.gateway || {}; VERS.boxes = {};
+    (v.boxes || []).forEach(b => VERS.boxes[b.name] = b);
+    document.getElementById('gwver').textContent = fmtVer(VERS.gateway) || 'nothing staged';
+  } catch (e) { document.getElementById('gwver').textContent = '?'; }
+  refresh();
+}
+function openDeployModal(title) {
+  document.getElementById('modaltitle').textContent = title;
+  document.getElementById('modalbody').textContent = 'starting…';
+  document.getElementById('modal').classList.add('show');
+}
+async function submitDeploy(endpoint, fd) {
+  let r;
+  try { r = await fetch(endpoint, {method: 'POST', body: fd}); }
+  catch (e) { document.getElementById('modalbody').textContent = 'request failed: ' + e; return; }
+  if (!r.ok) {
+    const j = await r.json().catch(() => ({}));
+    document.getElementById('modalbody').textContent = 'error: ' + (j.detail || r.status);
+    return;
+  }
+  pollDeploy();
+}
+async function stageFromGitHub() {
+  const fd = new FormData(); fd.append('url', '');   // empty => server's default main.zip
+  openDeployModal('Stage to gateway — GitHub (latest main)');
+  submitDeploy('/api/seafront/stage', fd);
+}
+async function stageUpload() {
+  const inp = document.getElementById('zipfile');
+  if (!inp.files.length) { toast('choose a bundle/zip first'); return; }
+  const fd = new FormData(); fd.append('file', inp.files[0]);
+  openDeployModal('Stage to gateway — ' + inp.files[0].name);
+  submitDeploy('/api/seafront/stage', fd);
+}
+async function updateBox(name) {
+  const gw = fmtVer(VERS.gateway) || 'staged version';
+  if (!confirm(`Flush the gateway's ${gw} to ${name}?\\n\\nThis does NOT restart a running service — a live acquisition keeps its current code until you restart it.`)) return;
+  openDeployModal('Update ' + name + ' → ' + gw);
+  submitDeploy('/api/scope/' + name + '/update', new FormData());
+}
+async function pollDeploy() {
+  const box = document.getElementById('modalbody');
+  try {
+    const j = await (await fetch('/api/seafront/deploy/log')).json();
+    box.textContent = j.log || '(no output yet)';
+    box.scrollTop = box.scrollHeight;
+    if (j.running) { setTimeout(pollDeploy, 1500); }
+    else { box.textContent += `\\n\\n--- finished (exit ${j.rc}) ---`; box.scrollTop = box.scrollHeight; fetchVersions(); }
+  } catch (e) { box.textContent += '\\npoll error: ' + e; }
+}
 async function refresh() {
   let data;
   try { data = await (await fetch('/api/status')).json(); }
@@ -258,6 +455,10 @@ async function refresh() {
     const card = document.createElement('div');
     card.className = 'card';
     const hs = m.host_up ? 'up' : 'down', ss = m.service_up ? 'up' : 'down';
+    const bv = VERS.boxes[m.name] || {};
+    const bstr = fmtVer(bv) || '—';
+    const gstr = fmtVer(VERS.gateway);
+    const stale = gstr && bv.version && (bv.version !== VERS.gateway.version || bv.source !== VERS.gateway.source);
     card.innerHTML = `
       <div class="name">${m.name}</div>
       <div class="signals">
@@ -265,11 +466,14 @@ async function refresh() {
         <div class="sig"><span class="dot ${ss}"></span>seafront: ${m.service_up ? 'running' : 'down'}</div>
       </div>
       <div class="meta">${m.host}:${m.proxy_port}</div>
+      <div class="meta">seafront ${bstr}${stale ? ' <span class="stale">(gateway has ' + gstr + ')</span>' : ''}</div>
       <div class="btns">
         <a class="open ${m.service_up ? '' : 'down'}" href="${url}">${m.service_up ? 'Open' : 'Offline'}</a>
         <button onclick="act('${m.name}','restart-service')">Restart service</button>
         <button onclick="view('${m.name}','config')">View config</button>
         <button onclick="view('${m.name}','logs')">View logs</button>
+        <button style="grid-column:1/3" class="${stale ? 'hot' : ''}" onclick="updateBox('${m.name}')">
+          Update${gstr ? ' → ' + gstr : ''}</button>
         <button class="danger" style="grid-column:1/3"
           onclick="act('${m.name}','reboot','Reboot ${m.name} (${m.host})? This interrupts anything running on it.')">
           Reboot computer</button>
@@ -281,8 +485,9 @@ async function refresh() {
   document.getElementById('foot').textContent =
     `${hostUp}/${data.length} computers up · ${svcUp}/${data.length} services running · updated ${new Date().toLocaleTimeString()}`;
 }
-refresh();
+fetchVersions();
 setInterval(refresh, 5000);
+setInterval(fetchVersions, 30000);   // versions need SSH per box — poll gently
 </script>
 </body>
 </html>"""

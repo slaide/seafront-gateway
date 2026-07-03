@@ -7,9 +7,10 @@ Wants=network-online.target
 Type=simple
 User=pharmbio
 WorkingDirectory=/home/pharmbio/microscope-gateway/dashboard
-# Bind 0.0.0.0 (IPv4): Wi-Fi hotspot clients get IPv4 addresses from NetworkManager.
+# Bind :: (dual-stack): serves IPv6 AND IPv4-mapped clients — mDNS (squidway.local)
+# may resolve to the box's IPv6 address, and an IPv4-only bind refuses those.
 # __DASHBOARD_PORT__ is substituted from config/microscopes.json by install.sh / apply-config.sh.
-ExecStart=/home/pharmbio/microscope-gateway/dashboard/.venv/bin/uvicorn app:app --host 0.0.0.0 --port __DASHBOARD_PORT__
+ExecStart=/home/pharmbio/microscope-gateway/dashboard/.venv/bin/uvicorn app:app --host :: --port __DASHBOARD_PORT__
 Restart=on-failure
 RestartSec=3
 
