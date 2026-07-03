@@ -100,7 +100,10 @@ Two programs run on the gateway, both driven from `config/microscopes.json`:
 | Script | Runs on | Does |
 |---|---|---|
 | `install.sh` | gateway | uv + Caddy + dashboard venv + both systemd services. Idempotent. |
-| `deploy.sh [user@host]` | dev machine | rsync repo to the gateway + run `install.sh` there. |
+| `deploy.sh [user@host]` | dev machine | rsync repo to the gateway + run `install.sh` there. One multiplexed SSH connection → asked for the password once (+ once for sudo). |
+| `undeploy.sh [user@host] [--purge]` | dev machine | reverse of install: stop/disable `caddy` + `microscope-dashboard`, remove the generated unit + Caddyfile. Leaves seafront alone (safe on lab3). `--purge` also apt-removes Caddy + deletes the checkout. |
+| `setup-fleet-control.sh` | gateway | one-time bootstrap for the dashboard's maintenance buttons: install the gateway's `~/.ssh/fleet` key on each scope + a NARROW sudoers rule (`systemctl {start,stop,restart,status,is-active} seafront` + `reboot`, nothing else). Prompts for each box's password once. |
+| `push-config.sh <scope>... \| --all [--no-restart]` | gateway | push central `configs/<scope>/config.json` → the box's `~/seafront/config.json` (backs up the old one), then restart seafront. Boxes keep a local copy, so they boot even if the gateway is down. |
 | `hotspot-up.sh` / `hotspot-down.sh` | gateway | start / stop the Wi-Fi AP. |
 | `setup-microscope-pc.sh <name> <ip>` | microscope PC (keyboard) | one-shot bring-up: hostname, ssh+avahi (mDNS), static IP (cures the DHCP hang), firewall. Idempotent. |
 | `install-seafront-service.sh <profile> [--dir D] [--port P] [--no-enable]` | microscope PC | seafront as a systemd service (survives logout + reboot, restarts on crash). |
