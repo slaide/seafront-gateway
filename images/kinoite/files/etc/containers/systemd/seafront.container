@@ -10,8 +10,9 @@ Image=192.168.50.1:5000/seafront:stable
 PublishPort=8000:8000
 # Persistent state on the writable host partition (survives OS upgrades).
 # config.json is pushed here by the gateway (scripts/push-config.sh); images land here too.
-Volume=/home/pharmbio/seafront:/var/seafront:z
-Environment=SEAFRONT_HOME=/var/seafront
+Volume=/home/pharmbio/seafront:/root/seafront:z
+# SEAFRONT_HOME must equal $HOME/seafront (=/root/seafront) — see the app Containerfile.
+Environment=SEAFRONT_HOME=/root/seafront
 # Profile to run from config.json. Flip to the real profile once hardware is wired.
 Environment=SEAFRONT_MICROSCOPE=mocroscope
 

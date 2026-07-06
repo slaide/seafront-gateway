@@ -5,7 +5,7 @@
     "camera.main.id": "PLACEHOLDER_USB_ID",
     "camera.main.driver": "galaxy",
     "microcontroller.id": "PLACEHOLDER_USB_ID",
-    "storage.base_image_output_dir": "/var/seafront/images",
+    "storage.base_image_output_dir": "/root/seafront/images",
     "calibration.offset.x_mm": 0.0,
     "calibration.offset.y_mm": 0.0,
     "calibration.offset.z_mm": 0.0,
