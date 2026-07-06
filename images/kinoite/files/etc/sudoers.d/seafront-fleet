@@ -1,0 +1,14 @@
+# Narrow, passwordless rule so the gateway (SSHing in as pharmbio with the fleet key)
+# can drive this box — and nothing else. Covers app restart, OS update, and reboot.
+# NB: no `podman pull` rule — a `:` in a command argument is a sudoers group separator
+# and makes the whole file invalid (sudo then IGNORES it). Not needed anyway: the
+# app update is `systemctl restart seafront`, whose quadlet ExecStartPre pulls :stable.
+pharmbio ALL=(root) NOPASSWD: \
+    /usr/bin/systemctl start seafront, \
+    /usr/bin/systemctl stop seafront, \
+    /usr/bin/systemctl restart seafront, \
+    /usr/bin/systemctl status seafront, \
+    /usr/bin/systemctl is-active seafront, \
+    /usr/bin/bootc upgrade, \
+    /usr/bin/bootc switch *, \
+    /usr/sbin/reboot

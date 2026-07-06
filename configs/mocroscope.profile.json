@@ -1,0 +1,26 @@
+{
+    "_comment": "Shared MOCK microscope profile. Add this object to the `microscopes` array of every box's configs/<box>/config.json, alongside that box's real (placeholder-ID) profile. Selected by `--microscope mocroscope` (the default in the seafront quadlet) so a box runs fully in mock mode with no hardware attached.",
+    "system.microscope_name": "mocroscope",
+    "system.microscope_type": "mock",
+    "camera.main.id": "PLACEHOLDER_USB_ID",
+    "camera.main.driver": "galaxy",
+    "microcontroller.id": "PLACEHOLDER_USB_ID",
+    "storage.base_image_output_dir": "/var/seafront/images",
+    "calibration.offset.x_mm": 0.0,
+    "calibration.offset.y_mm": 0.0,
+    "calibration.offset.z_mm": 0.0,
+    "laser.autofocus.available": "yes",
+    "laser.autofocus.camera.id": "PLACEHOLDER_USB_ID",
+    "laser.autofocus.camera.driver": "galaxy",
+    "filter.wheel.available": "no",
+    "imaging.channels": [
+        {"name": "Fluorescence 405 nm Ex", "handle": "fluo405", "source_slot": 11},
+        {"name": "Fluorescence 488 nm Ex", "handle": "fluo488", "source_slot": 12},
+        {"name": "Fluorescence 561 nm Ex", "handle": "fluo561", "source_slot": 14},
+        {"name": "Fluorescence 638 nm Ex", "handle": "fluo638", "source_slot": 13},
+        {"name": "BF LED matrix full", "handle": "bfledfull", "source_slot": 0},
+        {"name": "BF LED matrix left half", "handle": "bfledleft", "source_slot": 1},
+        {"name": "BF LED matrix right half", "handle": "bfledright", "source_slot": 2}
+    ],
+    "filter.wheel.configuration": []
+}

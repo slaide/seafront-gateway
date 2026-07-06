@@ -1,152 +1,123 @@
-# Microscope gateway
+# Seafront microscope fleet
 
-One gateway PC hosts a Wi-Fi hotspot + dashboard + Caddy reverse proxy; clients
-join the hotspot and reach every microscope through it. `config/microscopes.json`
-is the single source of truth.
+One **gateway** and N **microscope boxes**, all running the **same OS — Fedora Kinoite**
+(immutable KDE). The gateway (occasional internet) serves two OCI images from a local
+registry to the boxes (no internet) over an isolated wired backbone. Each box runs
+seafront in a podman container and a local KDE desktop as a break-glass console.
+Provisioning is "flash the OS, push an image" — no per-package installs on any machine.
+Architecture + rationale: [`docs/immutable-fleet.md`](docs/immutable-fleet.md).
 
-## Install
+- **Inventory / addressing:** `config/microscopes.json`. Backbone `192.168.50.0/24`,
+  **no DHCP**: gateway `.1`, boxes `.11–.14`. Credentials `pharmbio` fleet-wide.
+- **Two images:** `seafront` (the app) and `seafront-os` (the whole Kinoite OS).
+  Both live in the gateway registry at `192.168.50.1:5000`.
 
-**Gateway PC** (once):
-```bash
-bash scripts/install.sh        # uv + Caddy + dashboard, as boot services
-bash scripts/hotspot-up.sh     # start Wi-Fi AP (⚠ kills this PC's Wi-Fi internet)
-```
+## 1 · Gateway (once)
 
-**Each microscope PC** — ⚠ **run the first step at the keyboard, not over the wire.**
-A fresh box defaults to DHCP on the wired NIC and hangs at "setting network address"
-on our DHCP-less switch (see *Wired NIC hangs* below), so it's invisible on the wire
-until the wired NIC is pinned to a static IP. Sitting at the box (`<profile>` is
-seafront's hardware profile, e.g. `squid` — same on every box; `<name>`/`<ip>` are this
-box's identity, e.g. `lab1 192.168.50.11`. The seafront checkout is auto-detected under
-the user's home; pass `--dir <path>` only if a box has more than one):
-```bash
-bash scripts/setup-microscope-pc.sh      <name> <ip>   # net: hostname, mDNS, static IP, firewall
-git -C <seafront-checkout> pull                        # seafront MUST support --host (old checkouts don't)
-bash scripts/install-seafront-service.sh <profile>     # seafront as a boot service (auto-finds the checkout)
-```
-The `git pull` matters: a checkout too old for the `--host` flag makes the service
-crash-loop. `install-seafront-service.sh` refuses to install against such a checkout
-and tells you to pull first.
-then back on the gateway:
-```bash
-bash scripts/register-microscope.sh <name> <ip>                  # add to proxy + dashboard
-```
+1. Install **Fedora Kinoite** on the gateway PC; create user `pharmbio`. Give it internet
+   (Wi-Fi). (Same OS as the boxes — the gateway is just Kinoite + a few containers.)
+   Pin its backbone NIC to `192.168.50.1` (the registry binds this address; find the
+   wired NIC with `nmcli device status`):
+   ```bash
+   sudo nmcli connection modify "<wired-con>" ipv4.method manual ipv4.addresses 192.168.50.1/24
+   sudo nmcli connection up "<wired-con>"
+   ```
+2. Clone this repo and run setup. Kinoite is immutable, so nothing is installed into the
+   base: the registry and Caddy come up as **podman quadlets**, the dashboard as a `uv`
+   host service, and the fleet SSH key is generated:
+   ```bash
+   git clone <repo-url> ~/seafront-gateway && cd ~/seafront-gateway
+   bash scripts/gateway-setup.sh          # registry + Caddy + dashboard now running
+   ```
+3. Build + push both images (**the one step that needs internet**):
+   ```bash
+   bash scripts/build-images.sh           # seafront + seafront-os -> :5000
+   ```
+   Re-run `build-images.sh` whenever you want to refresh: reconnect the gateway to the
+   internet → build → done. Nothing else in the system ever touches the internet.
+4. Turn the OS image into a bootable USB installer (also needs internet):
+   ```bash
+   bash scripts/build-installer.sh        # -> out/bootiso/install.iso
+   sudo dd if=out/bootiso/install.iso of=/dev/sdX bs=4M status=progress oflag=sync
+   ```
 
-Once a box is network-reachable, the seafront-service step can be re-run for the **whole
-fleet at once** from the gateway instead of per box (no keys yet → pass the shared password):
-```bash
-MICROLAN_PASS=<password> bash scripts/deploy-seafront-service.sh --profile squid
-```
+## 2 · Each microscope box (once, at the keyboard)
 
-Open the dashboard at `http://<gateway>:8000`. Done.
+Prep first (once, on the gateway): create `configs/squid<n>/config.json` for each box —
+its real profile (placeholder USB IDs) **plus** the `mocroscope` object from
+`configs/mocroscope.profile.json`. seafront won't start without this file.
 
-## Addressing
+1. **Boot the box from the installer USB** (`install.iso` from §1.4) and install to the
+   internal disk. The box comes up already *being* the fleet image — no `bootc switch`,
+   no per-package setup. SSH trust, registry trust, USB rules, the seafront service, and
+   the kiosk autostart are all baked in; `pharmbio` is created by the installer.
+2. First boot, **at the keyboard**, set identity + backbone IP (the switch has no DHCP,
+   so the box is invisible on the wire until this runs):
+   ```bash
+   sudo box-postinstall <n>      # n = 1..4  ->  hostname squid<n>, IP 192.168.50.1<n>
+   ```
+3. Back on the gateway, push the box's config:
+   ```bash
+   bash scripts/push-config.sh squid<n>
+   ```
+   The box now serves seafront on `:8000` (mock profile) and auto-opens it fullscreen
+   once someone logs into KDE (autologin is off by default — see caveats).
 
-Static `192.168.50.0/24` on the wired backbone (no DHCP — addresses are fixed, not
-link-local). These are the `<name> <ip>` you pass to `setup-microscope-pc.sh`:
+## 3 · Updates (from the gateway, idle boxes only)
 
-| Name | IPv4 | Role |
-|---|---|---|
-| `squidway` | `192.168.50.1` | gateway (dedicated PC) — *future* |
-| `lab1` | `192.168.50.11` | microscope PC |
-| `lab2` | `192.168.50.12` | microscope PC |
-| `lab3` | `192.168.50.13` | microscope PC (also temp gateway until `squidway` exists) |
-| `lab4` | `192.168.50.14` | microscope PC |
-
-To reach the boxes by backbone IP from an admin/dev machine, give it an address on
-this subnet (without it you can only reach them via `labN.local` over IPv6 link-local):
-```bash
-# temporary (gone on reboot):
-sudo ip addr add 192.168.50.50/24 dev <wired-iface>
-# persistent, NetworkManager (adds to the existing profile, keeps other addresses):
-sudo nmcli connection modify "<profile>" +ipv4.addresses 192.168.50.50/24
-sudo nmcli connection up "<profile>"
-```
-
-## Day-to-day
-
-| Task | Command |
+| What | How |
 |---|---|
-| Start / stop services | `scripts/start.sh` · `scripts/stop.sh` |
-| Start / stop hotspot | `scripts/hotspot-up.sh` · `scripts/hotspot-down.sh` |
-| Status | `scripts/status.sh` |
-| Logs | `journalctl -u caddy -u microscope-dashboard -f` (gateway) · `journalctl -u seafront -f` (a scope) |
-| Change config by hand | edit `config/microscopes.json` → `scripts/apply-config.sh` |
+| **App** (seafront) | `build-images.sh --seafront`, then per box: `sudo systemctl restart seafront` (its quadlet `ExecStartPre` re-pulls `:stable`) |
+| **OS** (Kinoite) | `build-images.sh --os`, then per box: `sudo bootc upgrade` + reboot (staged in the spare slot, auto-rollback on bad boot) |
+| **Config** | edit `configs/squid<n>/config.json` → `push-config.sh squid<n>` |
 
----
+A running acquisition is never disturbed — update the idle boxes, flush the busy one later.
 
-## How it works
+## 4 · Remote access (convenience layer)
+
+Caddy on the gateway reverse-proxies `gateway:800<n>` → `squid<n>:8000`; the dashboard
+(`http://<gateway>:8000`) shows per-box health + links + logs. Edit
+`config/microscopes.json` then `bash scripts/apply-config.sh` to change the mapping.
+This is *only* convenience — the boxes are fully operable locally with it all down.
+
+## Layout
 
 ```
-   Wi-Fi hotspot ── clients join here
-        │
-   ┌────┴─────┐   :8000  dashboard (FastAPI)   ← this project
-   │ Gateway  │   :8001 → lab1:8000  ┐
-   │ squidway │   :8002 → lab2:8000  │  Caddy reverse proxy
-   └────┬─────┘   :8003 → lab3:8000  │  (root→root, WebSockets included)
-     switch       :8004 → lab4:8000  ┘
-   ┌──┬──┬──┬──┐
-  lab1 …       each runs:  seafront --host :: --port 8000  (systemd)
+config/microscopes.json   fleet inventory (source of truth)
+configs/<box>/config.json per-box seafront config (pushed; gitignored)
+configs/mocroscope.profile.json  shared mock profile to merge into each box config
+images/seafront/          app image Containerfile
+images/kinoite/           box OS image Containerfile + baked files/ tree
+images/gateway/           gateway service quadlets (registry, Caddy)
+scripts/                  gateway-setup, build-images, push-config, apply-config, start/stop/status
+dashboard/  Caddyfile      remote-access layer (dashboard = uv host service; Caddy = quadlet)
+docs/immutable-fleet.md   architecture
 ```
 
-Two programs run on the gateway, both driven from `config/microscopes.json`:
-- **Caddy** — reverse-proxies `gateway:800N` → `labN:8000`, root→root, so
-  seafront's HTML/API/WebSocket work with no rewriting.
-- **dashboard/** — FastAPI landing page; health-checks each microscope on demand
-  and links to its proxy port.
+## Pre-flash checklist / caveats
 
-## The scripts
+Prove these on the gateway + one box **before** flashing the whole fleet:
 
-| Script | Runs on | Does |
-|---|---|---|
-| `install.sh` | gateway | uv + Caddy + dashboard venv + both systemd services. Idempotent. |
-| `deploy.sh [user@host]` | dev machine | rsync repo to the gateway + run `install.sh` there. One multiplexed SSH connection → asked for the password once (+ once for sudo). |
-| `undeploy.sh [user@host] [--purge]` | dev machine | reverse of install: stop/disable `caddy` + `microscope-dashboard`, remove the generated unit + Caddyfile. Leaves seafront alone (safe on lab3). `--purge` also apt-removes Caddy + deletes the checkout. |
-| `setup-fleet-control.sh` | gateway | one-time bootstrap for the dashboard's maintenance buttons: install the gateway's `~/.ssh/fleet` key on each scope + a NARROW sudoers rule (`systemctl {start,stop,restart,status,is-active} seafront` + `reboot`, nothing else). Prompts for each box's password once. |
-| `push-config.sh <scope>... \| --all [--no-restart]` | gateway | push central `configs/<scope>/config.json` → the box's `~/seafront/config.json` (backs up the old one), then restart seafront. Boxes keep a local copy, so they boot even if the gateway is down. |
-| `hotspot-up.sh` / `hotspot-down.sh` | gateway | start / stop the Wi-Fi AP. |
-| `setup-microscope-pc.sh <name> <ip>` | microscope PC (keyboard) | one-shot bring-up: hostname, ssh+avahi (mDNS), static IP (cures the DHCP hang), firewall. Idempotent. |
-| `install-seafront-service.sh <profile> [--dir D] [--port P] [--no-enable]` | microscope PC | seafront as a systemd service (survives logout + reboot, restarts on crash). |
-| `deploy-seafront-service.sh [--profile P] [--dir D] [host ...]` | gateway | fan out `install-seafront-service.sh` to the whole fleet over SSH. |
-| `register-microscope.sh <name> <ip> [proxy_port] [seafront_port]` | gateway | add to `microscopes.json` (auto-picks proxy port) + reload proxy/dashboard. |
-| `apply-config.sh` | gateway | regenerate Caddyfile from config + reload services. |
+- **App image builds and imports cv2** — `build-images.sh --seafront` then
+  `podman run --rm …/seafront:stable python -c "import cv2, seafront"`. opencv on the
+  slim base may need extra libs (`libgomp1`, `libsm6`, `libxext6`, `libxrender1`); add
+  them to `images/seafront/Containerfile` if the import fails.
+- **OS image builds + `bootc-image-builder` produces a bootable ISO** — this whole path
+  (`build-installer.sh`) is unproven until run on a real Kinoite gateway; it's finicky
+  about rootful storage + registry trust.
+- **One box installs, boots, and the gateway can reach it** — confirms sshd + fleet key +
+  firewall + `box-postinstall` networking all line up.
+- **USB passthrough** (needs hardware): the quadlet device section +
+  `…/udev/rules.d/90-seafront-usb.rules` carry **placeholder vendor IDs** (fill from
+  `lsusb`), and SELinux is enforcing — you'll likely need `setsebool -P
+  container_use_devices on` (or `SecurityLabelDisable=true` in the quadlet).
 
-Notes on the per-PC scripts:
-- `setup-microscope-pc.sh` handles both network backends automatically: **NetworkManager**
-  (Ubuntu Desktop / Arch) and **netplan + systemd-networkd** (Ubuntu Server, where the NIC
-  shows as "unmanaged" and there is no "Wired connection 1" — it writes
-  `/etc/netplan/60-microscope-lan.yaml` instead). Either way it pins a **static** backbone
-  IP — Caddy's resolver may bypass mDNS, so `.local` names aren't reliable as proxy
-  upstreams. `--dir` exists because the seafront checkout path differs per machine.
-- Both per-PC scripts need `sudo` (a password unless the PC has passwordless sudo),
-  so run them in an interactive session on each PC, or set up passwordless sudo to
-  loop over hosts non-interactively.
-
-## Wired NIC hangs at "setting network address" (every fresh box)
-
-The switch has **no DHCP server** (deliberate — it's an isolated wired island). But a
-stock install defaults the wired NIC to DHCP (`ipv4.method = auto`), so on this switch
-it retries forever, sits in `connecting (getting IP configuration)` / "setting network
-address", and eventually NetworkManager **drops the interface** — the box then vanishes
-from the wire and (if it blocks boot) may hang on startup. Its Wi-Fi internet is
-unaffected.
-
-The cure is to take the wired NIC off DHCP — which `setup-microscope-pc.sh` does (it pins
-a static IP). The catch: until it runs, the box is unreachable over the wire, so **the
-first run must be at the keyboard** — that one run also installs ssh, so everything after
-is remote.
-
-(netplan/systemd-networkd boxes: the equivalent is `link-local: [ipv4, ipv6]` +
-`optional: true` — see `MICROSCOPE_NETWORK.md` §5b in the seafront repo.)
-
-## Notes
-
-- **Backbone addressing:** proxy upstreams in `config/microscopes.json` are static
-  IPs (e.g. `192.168.50.11`–`.14`). Adjust to match your wiring.
-- **Dashboard port** is `gateway.dashboard_port` in the config; the systemd unit is
-  generated from it. Use `8000` on a dedicated gateway.
-- **lab3 test box:** `lab3` doubles as a microscope PC (its own seafront on `:8000`),
-  so its dashboard runs on `:8080` and `squid1` points at `127.0.0.1`. On a dedicated
-  gateway, set `dashboard_port` back to `8000` and use real backbone IPs.
-- **Binds:** dashboard on `0.0.0.0` (hotspot clients get IPv4); Caddy dual-stack on
-  each `:800N` automatically.
+Deliberate / decisions:
+- **Kiosk needs a logged-in KDE session.** Autologin is off, so the fullscreen UI appears
+  after someone logs in (fine for break-glass). Enable SDDM autologin for `pharmbio` if
+  you want it on boot unattended.
+- **Dashboard stage/flush buttons are broken** — they still call the retired uv-deploy
+  script. Until rewired to `podman pull` + `bootc upgrade`, drive updates from the CLI
+  (§3). Status/logs/restart buttons still work.
+- **Fleet credential `pharmbio`** is baked into `images/kinoite/installer.toml`; change it
+  there if you don't want the shared password in the image.

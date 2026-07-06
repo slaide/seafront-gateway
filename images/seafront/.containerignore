@@ -1,0 +1,3 @@
+# nothing from the build context is needed (source is cloned inside the build);
+# keep the context tiny.
+*

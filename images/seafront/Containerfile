@@ -1,0 +1,36 @@
+# seafront APP image — the microscope-control server, one OCI image for the whole fleet.
+# Built on the gateway (which has on-demand internet), pushed to the gateway registry,
+# pulled by every box. No pip/uv/wheel resolution ever happens on a box.
+#
+#   podman build -t 192.168.50.1:5000/seafront:stable \
+#     --build-arg SEAFRONT_REF=<sha|tag> images/seafront
+#
+# The custom VCS deps (gxipy/toupcam/seaconfig) are fetched by `uv sync` at build time,
+# which is why this must build where there's internet.
+FROM python:3.13-slim-bookworm
+
+# runtime libs: opencv needs libGL+glib; cameras/Teensy need libusb; git for the VCS deps.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git libgl1 libglib2.0-0 libusb-1.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# uv, pinned by digest-free tag (build host has internet)
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+ARG SEAFRONT_REPO=https://github.com/slaide/seafront.git
+ARG SEAFRONT_REF=main
+RUN git clone "$SEAFRONT_REPO" /app \
+    && git -C /app checkout "$SEAFRONT_REF"
+WORKDIR /app
+RUN uv sync --frozen --no-dev
+
+# Config + acquired images live on a host volume mounted here (see the quadlet).
+# So the container is stateless; config.json is pushed to the box, not baked.
+ENV SEAFRONT_HOME=/var/seafront
+# Which profile in config.json to run. Default = mock until real hardware is wired.
+ENV SEAFRONT_MICROSCOPE=mocroscope
+
+EXPOSE 8000
+# Call the venv python directly — NOT `uv run`, which may touch the network to
+# re-check the environment. Boxes are offline, so the runtime must never need it.
+CMD ["sh", "-c", "exec /app/.venv/bin/python -m seafront --microscope \"$SEAFRONT_MICROSCOPE\" --host :: --port 8000"]

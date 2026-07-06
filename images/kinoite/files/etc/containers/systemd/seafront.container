@@ -1,0 +1,41 @@
+# Podman quadlet: runs the seafront app container as a system service.
+# `systemctl restart seafront` works because quadlet generates seafront.service.
+[Unit]
+Description=seafront microscope control
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image=192.168.50.1:5000/seafront:stable
+PublishPort=8000:8000
+# Persistent state on the writable host partition (survives OS upgrades).
+# config.json is pushed here by the gateway (scripts/push-config.sh); images land here too.
+Volume=/home/pharmbio/seafront:/var/seafront:z
+Environment=SEAFRONT_HOME=/var/seafront
+# Profile to run from config.json. Flip to the real profile once hardware is wired.
+Environment=SEAFRONT_MICROSCOPE=mocroscope
+
+# ---------------------------------------------------------------------------
+# USB PASSTHROUGH — HARDWARE, VALIDATE ON A REAL BOX BEFORE FLEET ROLLOUT.
+# Robust-to-hotplug pattern: mount the whole usb tree + allow the device-cgroup
+# classes, rather than binding a single node that vanishes on replug.
+#   189 = usb (libusb cameras), 166 = ttyACM (Teensy CDC-ACM serial)
+# ---------------------------------------------------------------------------
+Volume=/dev/bus/usb:/dev/bus/usb
+# NOTE the quotes: each cgroup-rule value contains spaces, and quadlet splits
+# PodmanArgs on whitespace — unquoted, the unit parses into garbage.
+PodmanArgs=--device-cgroup-rule='c 189:* rmw' --device-cgroup-rule='c 166:* rmw'
+# SELinux is enforcing on Kinoite: raw USB/serial from a container is denied unless
+# either `setsebool -P container_use_devices on` on the box OR (blunter) add:
+#SecurityLabelDisable=true
+# If the Teensy enumerates as /dev/ttyACM*, also expose it (adjust to the real node):
+#AddDevice=/dev/ttyACM0
+
+[Service]
+Restart=always
+RestartSec=5
+# Refresh from the gateway registry on start if reachable; keep the local image when offline.
+ExecStartPre=-/usr/bin/podman pull 192.168.50.1:5000/seafront:stable
+
+[Install]
+WantedBy=multi-user.target default.target

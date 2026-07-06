@@ -1,0 +1,3 @@
+# Kernel args baked into the image (bootc applies them at deploy).
+# High-resolution cameras exhaust the default usbfs buffer; raise it.
+kargs = ["usbcore.usbfs_memory_mb=1000"]

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=seafront console
+Comment=Open the local microscope web UI fullscreen
+Exec=/usr/bin/seafront-kiosk
+X-KDE-autostart-phase=2
+OnlyShowIn=KDE;
+Terminal=false

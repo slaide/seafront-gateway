@@ -1,0 +1,47 @@
+# seafront OS image — the WHOLE microscope-box operating system as one bootable
+# OCI image (Fedora Kinoite / KDE, immutable, via bootc). Built on the gateway,
+# pushed to the gateway registry, tracked by every box with `bootc upgrade`.
+#
+#   podman build -t 192.168.50.1:5000/seafront-os:stable images/kinoite
+#
+# Everything a box needs is baked in here so provisioning is "flash, done":
+#   - podman + the seafront quadlet (pulls the app image from the gateway registry)
+#   - trust for the gateway's insecure (LAN-only, HTTP) registry
+#   - usbfs kernel arg + udev rules for the camera/Teensy USB devices
+#   - the gateway's fleet SSH pubkey + a narrow sudoers rule (so the gateway can
+#     drive the box: restart seafront, bootc upgrade, reboot)
+#   - a Firefox kiosk autostart to localhost:8000 (the break-glass operator console)
+#   - box-postinstall on PATH (sets per-box identity + backbone IP at first boot)
+#
+# NOTE: the base tag tracks a Fedora release; bump it deliberately when you want a
+# newer Fedora. fedora-ostree-desktops publishes Kinoite as an OCI/ostree image that
+# bootc can consume directly.
+ARG FEDORA_VERSION=42
+FROM quay.io/fedora-ostree-desktops/kinoite:${FEDORA_VERSION}
+
+# --- host packages (kept minimal; the camera SDKs live in the APP image, not here) ---
+# podman is present on Kinoite; add nothing unless required. Layer extras here if a
+# box needs them, e.g.:  RUN rpm-ostree install --idempotent firefox
+# (Firefox ships with Kinoite; if your base lacks it, uncomment the line above.)
+
+# --- baked configuration (see files/ tree) ---
+COPY files/ /
+
+# The gateway's fleet public key is injected into the build context by build-images.sh
+# (copied from ~/.ssh/fleet.pub on the gateway) so the real key is baked, not committed.
+COPY fleet.pub /etc/ssh/authorized_keys.d/pharmbio
+
+# Fix modes COPY doesn't guarantee: sudoers must be 0440 or sudo ignores it;
+# the baked scripts must be executable.
+RUN chmod 0440 /etc/sudoers.d/seafront-fleet \
+    && chmod 0755 /usr/bin/box-postinstall /usr/bin/seafront-kiosk \
+    && chmod 0644 /etc/ssh/authorized_keys.d/pharmbio
+
+# Enable remote management + open the ports. Without these the gateway cannot reach
+# the box at all (sshd off by default) and firewalld would block 8000 (remote web UI)
+# and even ssh. (localhost:8000 for the kiosk is loopback, never filtered.)
+RUN systemctl enable sshd.service
+RUN firewall-offline-cmd --add-service=ssh --add-port=8000/tcp || true
+
+# bootc/ostree image-mode requirement: a lint pass that the image is bootable.
+RUN bootc container lint || true

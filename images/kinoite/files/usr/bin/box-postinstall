@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Run ON a microscope box at first boot, AT THE KEYBOARD: give it its identity and
+# put it on the isolated backbone so the gateway can manage it. Everything else
+# (SSH trust, registry trust, the seafront service, kiosk) is already baked into the
+# image, so this only sets hostname + static IP.
+#
+#   sudo box-postinstall <n>     # n = box number: hostname squid<n>, IP 192.168.50.1<n>
+set -euo pipefail
+[ "$(id -u)" = 0 ] || { echo "run with sudo"; exit 1; }
+N="${1:?usage: box-postinstall <n>   (e.g. 1 -> squid1 / 192.168.50.11)}"
+IP="192.168.50.1${N}"
+NAME="squid${N}"
+
+# first wired (type==1, non-wireless) NIC
+NIC=""
+for d in /sys/class/net/*; do
+    n=$(basename "$d"); [ "$n" = lo ] && continue
+    [ -d "$d/wireless" ] && continue
+    [ "$(cat "$d/type" 2>/dev/null)" = 1 ] && { NIC="$n"; break; }
+done
+[ -n "$NIC" ] || { echo "!! no wired NIC found"; exit 1; }
+
+echo "==> $NAME -> $IP on $NIC (backbone has no DHCP: pinning static)"
+hostnamectl set-hostname "$NAME"
+if nmcli -g GENERAL.CONNECTION device show "$NIC" | grep -q .; then
+    CON="$(nmcli -g GENERAL.CONNECTION device show "$NIC")"
+    nmcli connection modify "$CON" ipv4.method manual ipv4.addresses "$IP/24"
+    nmcli connection up "$CON"
+else
+    nmcli connection add type ethernet ifname "$NIC" con-name backbone \
+        ipv4.method manual ipv4.addresses "$IP/24"
+    nmcli connection up backbone
+fi
+
+# writable state dir the seafront container mounts (config.json + acquired images)
+install -d -o pharmbio -g pharmbio /home/pharmbio/seafront
+
+# start seafront for THIS boot (it's already boot-enabled via the quadlet's [Install];
+# quadlet-generated units cannot be `systemctl enable`d the normal way). It pulls the
+# app image from the gateway registry now that the backbone is up.
+systemctl start seafront.service || true
+
+echo "==> $NAME is up at $IP. From the gateway: scripts/push-config.sh $NAME"

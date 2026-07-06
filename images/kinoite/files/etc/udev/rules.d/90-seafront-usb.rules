@@ -1,0 +1,12 @@
+# USB access for the seafront container. PLACEHOLDER vendor IDs — replace with the
+# real ones once a camera + Teensy are connected (`lsusb` on the box). MODE=0666 lets
+# the container (any uid) open the raw device; tighten to a group if you prefer.
+
+# Daheng / Galaxy (gxipy) cameras — set idVendor to the real value:
+#SUBSYSTEM=="usb", ATTRS{idVendor}=="2ba9", MODE="0666"
+
+# ToupTek (toupcam) cameras — set idVendor to the real value:
+#SUBSYSTEM=="usb", ATTRS{idVendor}=="0547", MODE="0666"
+
+# Teensy microcontroller (PJRC, vendor 16c0): serial node + a stable symlink.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="16c0", MODE="0666", SYMLINK+="teensy"

@@ -4,3 +4,7 @@ __pycache__/
 # Caddyfile is generated from config/microscopes.json
 /Caddyfile
 configs/*/config.json
+# gateway fleet pubkey, injected into the OS image build context at build time
+images/kinoite/fleet.pub
+# installer output from build-installer.sh
+/out/

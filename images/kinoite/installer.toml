@@ -1,0 +1,12 @@
+# bootc-image-builder customizations, consumed by scripts/build-installer.sh.
+# Bakes the fleet user into the installer so a flashed box comes up with pharmbio
+# already created — no interactive user setup. Change the password here if you don't
+# want the shared fleet credential in the image. (SSH key access from the gateway is
+# separate: the fleet pubkey is baked by the Containerfile.)
+[[customizations.user]]
+name = "pharmbio"
+password = "pharmbio"
+groups = ["wheel"]
+
+# Optional: pin the disk layout for unattended installs. Left default (interactive
+# disk selection in the anaconda ISO) so you can pick the target disk per box.

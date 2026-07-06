@@ -1,0 +1,19 @@
+# Podman quadlet (system): Caddy reverse proxy for remote access.
+# gateway:800N -> squidN:8000. Network=host so it binds the proxy ports and can
+# reach the backbone boxes directly. Caddyfile is generated from microscopes.json.
+[Unit]
+Description=Caddy reverse proxy (gateway -> boxes)
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image=docker.io/library/caddy:2
+Network=host
+Volume=/etc/caddy/Caddyfile:/etc/caddy/Caddyfile:z,ro
+Exec=caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=multi-user.target default.target

@@ -6,7 +6,7 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 python3 "$DIR/scripts/gen-caddyfile.py"
 sudo install -m 644 "$DIR/Caddyfile" /etc/caddy/Caddyfile
-sudo systemctl reload caddy
+sudo systemctl restart caddy   # Caddy is a podman quadlet container — restart, not reload
 
 # regenerate the dashboard unit (the port may have changed in config)
 DASH_PORT=$(python3 -c "import json;print(json.load(open('$DIR/config/microscopes.json'))['gateway']['dashboard_port'])")
