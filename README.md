@@ -35,6 +35,9 @@ Architecture + rationale: [`docs/immutable-fleet.md`](docs/immutable-fleet.md).
    ```
    Re-run `build-images.sh` whenever you want to refresh: reconnect the gateway to the
    internet → build → done. Nothing else in the system ever touches the internet.
+   The app image builds `--frozen` from a **pinned seafront commit** (`SEAFRONT_REF` in
+   `build-images.sh`) + its committed `uv.lock`, so a given gateway commit reproduces the
+   exact same image.
 4. Turn the OS image into a bootable USB installer (also needs internet):
    ```bash
    bash scripts/build-installer.sh        # -> out/bootiso/install.iso
@@ -67,7 +70,7 @@ its real profile (placeholder USB IDs) **plus** the `mocroscope` object from
 
 | What | How |
 |---|---|
-| **App** (seafront) | `build-images.sh --seafront`, then per box: `sudo systemctl restart seafront` (its quadlet `ExecStartPre` re-pulls `:stable`) |
+| **App** (seafront) | bump `SEAFRONT_REF` in `build-images.sh` → `build-images.sh --seafront` → per box `sudo systemctl restart seafront` (quadlet `ExecStartPre` re-pulls `:stable`) |
 | **OS** (Kinoite) | `build-images.sh --os`, then per box: `sudo bootc upgrade` + reboot (staged in the spare slot, auto-rollback on bad boot) |
 | **Config** | edit `configs/squid<n>/config.json` → `push-config.sh squid<n>` |
 
@@ -89,35 +92,27 @@ configs/mocroscope.profile.json  shared mock profile to merge into each box conf
 images/seafront/          app image Containerfile
 images/kinoite/           box OS image Containerfile + baked files/ tree
 images/gateway/           gateway service quadlets (registry, Caddy)
-scripts/                  gateway-setup, build-images, push-config, apply-config, start/stop/status
+scripts/                  gateway-setup, build-images, build-installer, push-config, apply-config, start/stop/status
 dashboard/  Caddyfile      remote-access layer (dashboard = uv host service; Caddy = quadlet)
 docs/immutable-fleet.md   architecture
 ```
 
 ## Pre-flash checklist / caveats
 
-Prove these on the gateway + one box **before** flashing the whole fleet:
+Unproven — verify on the gateway + one box before flashing the fleet:
 
-- **App image builds and imports cv2** — `build-images.sh --seafront` then
-  `podman run --rm …/seafront:stable python -c "import cv2, seafront"`. opencv on the
-  slim base may need extra libs (`libgomp1`, `libsm6`, `libxext6`, `libxrender1`); add
-  them to `images/seafront/Containerfile` if the import fails.
-- **OS image builds + `bootc-image-builder` produces a bootable ISO** — this whole path
-  (`build-installer.sh`) is unproven until run on a real Kinoite gateway; it's finicky
-  about rootful storage + registry trust.
-- **One box installs, boots, and the gateway can reach it** — confirms sshd + fleet key +
-  firewall + `box-postinstall` networking all line up.
-- **USB passthrough** (needs hardware): the quadlet device section +
-  `…/udev/rules.d/90-seafront-usb.rules` carry **placeholder vendor IDs** (fill from
-  `lsusb`), and SELinux is enforcing — you'll likely need `setsebool -P
-  container_use_devices on` (or `SecurityLabelDisable=true` in the quadlet).
+- **`bootc-image-builder` ISO** (`build-installer.sh`) — untested; finicky about rootful
+  storage + registry trust on the gateway.
+- **One box installs, boots, and the gateway can reach it** — exercises sshd + fleet key +
+  firewall + `box-postinstall` networking together.
+- **USB passthrough** (needs hardware): `…/udev/rules.d/90-seafront-usb.rules` and the
+  quadlet device section carry **placeholder vendor IDs** (fill from `lsusb`); SELinux is
+  enforcing, so you'll likely need `setsebool -P container_use_devices on` (or
+  `SecurityLabelDisable=true` in the quadlet).
 
-Deliberate / decisions:
-- **Kiosk needs a logged-in KDE session.** Autologin is off, so the fullscreen UI appears
-  after someone logs in (fine for break-glass). Enable SDDM autologin for `pharmbio` if
-  you want it on boot unattended.
-- **Dashboard stage/flush buttons are broken** — they still call the retired uv-deploy
-  script. Until rewired to `podman pull` + `bootc upgrade`, drive updates from the CLI
-  (§3). Status/logs/restart buttons still work.
-- **Fleet credential `pharmbio`** is baked into `images/kinoite/installer.toml`; change it
-  there if you don't want the shared password in the image.
+Current limitations:
+- **Kiosk needs a logged-in KDE session** (autologin off) — the UI appears after login.
+  Enable SDDM autologin for `pharmbio` to have it come up unattended.
+- **Dashboard stage/flush buttons aren't wired to the image/bootc flow** — drive updates
+  from the CLI (§3); status/logs/restart work.
+- **Fleet credential `pharmbio`** is baked into `images/kinoite/installer.toml`.
