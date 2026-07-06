@@ -41,7 +41,8 @@ RUN chmod 0440 /etc/sudoers.d/seafront-fleet \
 # the box at all (sshd off by default) and firewalld would block 8000 (remote web UI)
 # and even ssh. (localhost:8000 for the kiosk is loopback, never filtered.)
 RUN systemctl enable sshd.service
-RUN firewall-offline-cmd --add-service=ssh --add-port=8000/tcp || true
+# separate invocations: firewall-offline-cmd rejects --add-service + --add-port together.
+RUN firewall-offline-cmd --add-service=ssh && firewall-offline-cmd --add-port=8000/tcp
 
 # bootc/ostree image-mode requirement: a lint pass that the image is bootable.
 RUN bootc container lint || true
