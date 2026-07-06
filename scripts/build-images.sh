@@ -10,7 +10,10 @@
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REG="${REGISTRY:-192.168.50.1:5000}"
-REF="${SEAFRONT_REF:-main}"
+# Pinned seafront commit (source of truth). A gateway commit + this SHA + seafront's
+# committed uv.lock fully determine the app image. Bump this to roll the app forward;
+# override with SEAFRONT_REF=<sha|tag> only for one-off testing.
+REF="${SEAFRONT_REF:-dba35b3773dea851939f8964a30b9aa37ec3cd9d}"
 
 DO_APP=0; DO_OS=0
 [ $# -eq 0 ] && { DO_APP=1; DO_OS=1; }

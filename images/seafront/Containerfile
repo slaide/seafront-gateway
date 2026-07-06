@@ -18,7 +18,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 ARG SEAFRONT_REPO=https://github.com/slaide/seafront.git
-ARG SEAFRONT_REF=main
+# Pinned for reproducibility. scripts/build-images.sh is the source of truth and passes
+# the pinned SHA via --build-arg; keep this default in sync with it when bumping.
+ARG SEAFRONT_REF=dba35b3773dea851939f8964a30b9aa37ec3cd9d
 RUN git clone "$SEAFRONT_REPO" /app \
     && git -C /app checkout "$SEAFRONT_REF"
 WORKDIR /app
