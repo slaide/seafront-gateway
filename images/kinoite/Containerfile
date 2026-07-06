@@ -16,7 +16,7 @@
 # NOTE: the base tag tracks a Fedora release; bump it deliberately when you want a
 # newer Fedora. fedora-ostree-desktops publishes Kinoite as an OCI/ostree image that
 # bootc can consume directly.
-ARG FEDORA_VERSION=42
+ARG FEDORA_VERSION=44
 FROM quay.io/fedora-ostree-desktops/kinoite:${FEDORA_VERSION}
 
 # --- host packages (kept minimal; the camera SDKs live in the APP image, not here) ---
