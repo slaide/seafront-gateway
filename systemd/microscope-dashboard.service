@@ -10,7 +10,10 @@ WorkingDirectory=/home/pharmbio/microscope-gateway/dashboard
 # Bind :: (dual-stack): serves IPv6 AND IPv4-mapped clients — mDNS (squidway.local)
 # may resolve to the box's IPv6 address, and an IPv4-only bind refuses those.
 # __DASHBOARD_PORT__ is substituted from config/microscopes.json by gateway-setup.sh / apply-config.sh.
-ExecStart=/home/pharmbio/microscope-gateway/dashboard/.venv/bin/uvicorn app:app --host :: --port __DASHBOARD_PORT__
+# --app-dir pins where `app:app` is imported from, so the unit does not depend on the
+# process CWD matching WorkingDirectory (a CWD mismatch surfaces as the misleading
+# "Error loading ASGI app. Could not import module 'app'.").
+ExecStart=/home/pharmbio/microscope-gateway/dashboard/.venv/bin/uvicorn --app-dir /home/pharmbio/microscope-gateway/dashboard app:app --host :: --port __DASHBOARD_PORT__
 Restart=on-failure
 RestartSec=3
 

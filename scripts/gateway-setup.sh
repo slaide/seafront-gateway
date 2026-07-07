@@ -14,6 +14,9 @@ echo "==> fleet SSH key (gateway -> boxes; .pub is baked into the box image)"
 [ -f "$HOME/.ssh/fleet" ] || ssh-keygen -t ed25519 -N '' -f "$HOME/.ssh/fleet" -C fleet@squidway
 
 echo "==> dashboard venv"
+# Rebuild from scratch: a stale .venv (e.g. left by a repo move/rename) makes `uv sync`
+# a near-no-op that leaves console scripts with dead shebangs -> systemd 203/EXEC.
+rm -rf "$DIR/dashboard/.venv"
 ( cd "$DIR/dashboard" && uv sync )
 
 echo "==> trust the gateway's own registry (so bootc-image-builder / podman can pull it)"
