@@ -65,8 +65,14 @@ sed "s/__DASHBOARD_PORT__/$DASH_PORT/; s#/opt/seafront-gateway#$DIR#g" \
 sudo systemctl daemon-reload
 sudo systemctl enable --now microscope-dashboard
 
-echo "==> firewall: open registry + dashboard + proxy ports (Kinoite runs firewalld)"
+echo "==> remote management: enable sshd so the gateway is reachable over ssh"
+# Kinoite ships sshd OFF by default (images/kinoite/Containerfile enables it on the boxes
+# for the same reason). The gateway needs it too, or there is no way in over the network.
+sudo systemctl enable --now sshd
+
+echo "==> firewall: open ssh + registry + dashboard + proxy ports (Kinoite runs firewalld)"
 if command -v firewall-cmd >/dev/null; then
+    sudo firewall-cmd --permanent --add-service=ssh >/dev/null
     PORTS=$(python3 -c "import json;d=json.load(open('$DIR/config/microscopes.json'));print(5000);print(d['gateway']['dashboard_port']);[print(m['proxy_port']) for m in d['microscopes']]")
     for p in $PORTS; do sudo firewall-cmd --permanent --add-port="$p/tcp" >/dev/null; done
     sudo firewall-cmd --reload
