@@ -43,4 +43,8 @@ ENV SEAFRONT_MICROSCOPE=mocroscope
 EXPOSE 8000
 # `uv run --no-sync` runs the pre-built venv as-is: idiomatic, and it never touches the
 # network. (Plain `uv run` re-resolves and FAILS offline — verified; --no-sync is required.)
-CMD ["sh", "-c", "exec uv run --no-sync python -m seafront --microscope \"$SEAFRONT_MICROSCOPE\" --host :: --port 8000"]
+# Bind 0.0.0.0, NOT ::: uvicorn's IPv6 socket comes up V6ONLY (confirmed on the gateway
+# dashboard), and podman PublishPort reaches this socket over IPv4 on the IPv4-only
+# backbone — `::` would leave seafront reachable only on the box's own ::1 (kiosk) while
+# the gateway/Caddy proxy to <box>:8000 gets connection-refused (502).
+CMD ["sh", "-c", "exec uv run --no-sync python -m seafront --microscope \"$SEAFRONT_MICROSCOPE\" --host 0.0.0.0 --port 8000"]
