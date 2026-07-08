@@ -20,9 +20,19 @@ OUT="${OUT:-$DIR/out}"
 TYPE="${TYPE:-anaconda-iso}"     # anaconda-iso | raw | qcow2
 CONFIG="$DIR/images/kinoite/installer.toml"   # optional: bakes the pharmbio user
 
+ROOTFS="${ROOTFS:-xfs}"           # the Kinoite bootc image declares no default root fs,
+                                  # so bib requires --rootfs at install time (ISO build);
+                                  # it does not affect `bootc upgrade` on installed boxes.
 mkdir -p "$OUT"
-ARGS=(--type "$TYPE" --tls-verify=false)
+ARGS=(--type "$TYPE" --rootfs "$ROOTFS" --tls-verify=false)
 [ -f "$CONFIG" ] && ARGS+=(--config /config.toml)
+
+# Recent bootc-image-builder does NOT pull the target image itself — it reads it from the
+# mounted rootful storage (/var/lib/containers/storage). build-images.sh builds ROOTLESS
+# and pushes to the registry, so the rootful store lacks it; without this pull bib fails
+# with "image not known". Pull it into rootful storage from the LAN (insecure) registry.
+echo "==> pull seafront-os into rootful storage (bib reads it there; it won't pull)"
+sudo podman pull --tls-verify=false "$REG/seafront-os:stable"
 
 sudo podman run --rm --privileged --pull=newer \
     --security-opt label=type:unconfined_t \
