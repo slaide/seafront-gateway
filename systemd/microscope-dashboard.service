@@ -13,13 +13,16 @@ WorkingDirectory=/opt/seafront-gateway/dashboard
 # fails with "Permission denied" (audit: avc denied { execute } ... user_home_t), even
 # though the owning user can run the same command by hand. /opt gets a system label the
 # service domain may execute. gateway-setup.sh enforces this and runs restorecon.
-# Bind :: (dual-stack): serves IPv6 AND IPv4-mapped clients — mDNS (squidway.local)
-# may resolve to the box's IPv6 address, and an IPv4-only bind refuses those.
+# Bind 0.0.0.0 (all IPv4). The management path is the IPv4-only backbone (gateway
+# 192.168.50.1, boxes .11-.14, no DHCP/IPv6), so IPv4 is what must work. Do NOT use
+# `--host ::`: despite net.ipv6.bindv6only=0, uvicorn's IPv6 socket comes up V6ONLY
+# and REFUSES IPv4 — the dashboard then answers on ::1 but is unreachable at
+# 192.168.50.1:8000 over the backbone (verified on the gateway).
 # __DASHBOARD_PORT__ is substituted from config/microscopes.json by gateway-setup.sh / apply-config.sh.
 # --app-dir pins where `app:app` is imported from, so the unit does not depend on the
 # process CWD matching WorkingDirectory (a CWD mismatch surfaces as the misleading
 # "Error loading ASGI app. Could not import module 'app'.").
-ExecStart=/opt/seafront-gateway/dashboard/.venv/bin/uvicorn --app-dir /opt/seafront-gateway/dashboard app:app --host :: --port __DASHBOARD_PORT__
+ExecStart=/opt/seafront-gateway/dashboard/.venv/bin/uvicorn --app-dir /opt/seafront-gateway/dashboard app:app --host 0.0.0.0 --port __DASHBOARD_PORT__
 Restart=on-failure
 RestartSec=3
 
