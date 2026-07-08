@@ -2,9 +2,29 @@
 # Run ON the gateway (Fedora Kinoite — the SAME OS as the boxes), once, with internet.
 # Kinoite is immutable: nothing is installed into the base. The gateway's services run
 # as podman quadlets (registry, Caddy) — the same substrate the boxes use — and the
-# dashboard runs as a host service off a uv venv in $HOME (no base changes).
+# dashboard runs as a host service off a uv venv inside this checkout (no base changes).
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# The checkout must NOT live under a home directory. SELinux (enforcing on Kinoite) labels
+# everything under /home (== /var/home) and /root 'user_home_t'/'admin_home_t', and the
+# dashboard's systemd service domain is forbidden from exec'ing those files — the venv's
+# uvicorn dies with "Permission denied" even though you can run it by hand. Fail loudly with
+# the exact fix instead of installing a service that can never start.
+case "$DIR" in
+    /home/*|/var/home/*|/root/*|/var/roothome/*)
+        cat >&2 <<EOF
+!! Refusing to install from a home directory:
+!!     $DIR
+!! SELinux labels this 'user_home_t'; a systemd service cannot exec the venv here
+!! (audit: avc denied { execute } ... user_home_t). Move the checkout under /opt:
+!!
+!!     sudo mv "$DIR" /opt/seafront-gateway
+!!     sudo chown -R "\$USER:\$(id -gn)" /opt/seafront-gateway
+!!     cd /opt/seafront-gateway && bash scripts/gateway-setup.sh
+EOF
+        exit 1 ;;
+esac
 
 echo "==> uv (dashboard runtime; installs into ~/.local, base untouched)"
 command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -18,6 +38,10 @@ echo "==> dashboard venv"
 # a near-no-op that leaves console scripts with dead shebangs -> systemd 203/EXEC.
 rm -rf "$DIR/dashboard/.venv"
 ( cd "$DIR/dashboard" && uv sync )
+# Label the freshly built tree with its on-disk defaults (e.g. usr_t under /opt) so the
+# service domain may exec the venv. Without this, files created here can retain a context
+# the service can't run. No-op on systems without SELinux tooling.
+command -v restorecon >/dev/null && sudo restorecon -RF "$DIR"
 
 echo "==> trust the gateway's own registry (so bootc-image-builder / podman can pull it)"
 sudo install -d /etc/containers/registries.conf.d
@@ -35,7 +59,7 @@ sudo systemctl start registry caddy
 
 echo "==> dashboard host service"
 DASH_PORT=$(python3 -c "import json;print(json.load(open('$DIR/config/microscopes.json'))['gateway']['dashboard_port'])")
-sed "s/__DASHBOARD_PORT__/$DASH_PORT/; s#/home/pharmbio/microscope-gateway#$DIR#g" \
+sed "s/__DASHBOARD_PORT__/$DASH_PORT/; s#/opt/seafront-gateway#$DIR#g" \
     "$DIR/systemd/microscope-dashboard.service" \
     | sudo tee /etc/systemd/system/microscope-dashboard.service >/dev/null
 sudo systemctl daemon-reload

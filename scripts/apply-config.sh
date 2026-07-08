@@ -10,7 +10,7 @@ sudo systemctl restart caddy   # Caddy is a podman quadlet container — restart
 
 # regenerate the dashboard unit (the port may have changed in config)
 DASH_PORT=$(python3 -c "import json;print(json.load(open('$DIR/config/microscopes.json'))['gateway']['dashboard_port'])")
-sed "s/__DASHBOARD_PORT__/$DASH_PORT/" "$DIR/systemd/microscope-dashboard.service" \
+sed "s/__DASHBOARD_PORT__/$DASH_PORT/; s#/opt/seafront-gateway#$DIR#g" "$DIR/systemd/microscope-dashboard.service" \
   | sudo tee /etc/systemd/system/microscope-dashboard.service >/dev/null
 sudo systemctl daemon-reload
 sudo systemctl restart microscope-dashboard

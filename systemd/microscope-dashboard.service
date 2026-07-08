@@ -6,14 +6,20 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=pharmbio
-WorkingDirectory=/home/pharmbio/microscope-gateway/dashboard
+WorkingDirectory=/opt/seafront-gateway/dashboard
+# The checkout MUST live outside any home directory. SELinux (enforcing on Kinoite)
+# labels everything under /home (== /var/home) 'user_home_t', and a systemd service's
+# confined domain is forbidden from exec'ing user_home_t files -> the venv's uvicorn
+# fails with "Permission denied" (audit: avc denied { execute } ... user_home_t), even
+# though the owning user can run the same command by hand. /opt gets a system label the
+# service domain may execute. gateway-setup.sh enforces this and runs restorecon.
 # Bind :: (dual-stack): serves IPv6 AND IPv4-mapped clients — mDNS (squidway.local)
 # may resolve to the box's IPv6 address, and an IPv4-only bind refuses those.
 # __DASHBOARD_PORT__ is substituted from config/microscopes.json by gateway-setup.sh / apply-config.sh.
 # --app-dir pins where `app:app` is imported from, so the unit does not depend on the
 # process CWD matching WorkingDirectory (a CWD mismatch surfaces as the misleading
 # "Error loading ASGI app. Could not import module 'app'.").
-ExecStart=/home/pharmbio/microscope-gateway/dashboard/.venv/bin/uvicorn --app-dir /home/pharmbio/microscope-gateway/dashboard app:app --host :: --port __DASHBOARD_PORT__
+ExecStart=/opt/seafront-gateway/dashboard/.venv/bin/uvicorn --app-dir /opt/seafront-gateway/dashboard app:app --host :: --port __DASHBOARD_PORT__
 Restart=on-failure
 RestartSec=3
 

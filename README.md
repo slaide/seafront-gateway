@@ -22,13 +22,22 @@ Architecture + rationale: [`docs/immutable-fleet.md`](docs/immutable-fleet.md).
    sudo nmcli connection modify "<wired-con>" ipv4.method manual ipv4.addresses 192.168.50.1/24
    sudo nmcli connection up "<wired-con>"
    ```
-2. Clone this repo and run setup. Kinoite is immutable, so nothing is installed into the
-   base: the registry and Caddy come up as **podman quadlets**, the dashboard as a `uv`
-   host service, and the fleet SSH key is generated:
+2. Clone this repo into **`/opt/seafront-gateway`** (NOT your home directory) and run
+   setup. Kinoite is immutable, so nothing is installed into the base: the registry and
+   Caddy come up as **podman quadlets**, the dashboard as a `uv` host service, and the
+   fleet SSH key is generated:
    ```bash
-   git clone <repo-url> ~/seafront-gateway && cd ~/seafront-gateway
+   sudo git clone <repo-url> /opt/seafront-gateway
+   sudo chown -R "$USER:$(id -gn)" /opt/seafront-gateway
+   cd /opt/seafront-gateway
    bash scripts/gateway-setup.sh          # registry + Caddy + dashboard now running
    ```
+   > **Why `/opt`, not `$HOME`:** SELinux is enforcing on Kinoite and labels everything
+   > under `/home` (`== /var/home`) as `user_home_t`. A systemd service's confined domain
+   > is not allowed to *execute* `user_home_t` files, so the dashboard's venv `uvicorn`
+   > fails with "Permission denied" — even though the same command runs fine by hand (a
+   > login shell runs in an unconfined domain). `/opt` gets a system label the service may
+   > execute. `gateway-setup.sh` refuses to install from a home path and runs `restorecon`.
 3. Build + push both images (**the one step that needs internet**):
    ```bash
    bash scripts/build-images.sh           # seafront + seafront-os -> :5000
