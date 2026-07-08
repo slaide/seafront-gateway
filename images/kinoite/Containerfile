@@ -44,5 +44,12 @@ RUN systemctl enable sshd.service
 # separate invocations: firewall-offline-cmd rejects --add-service + --add-port together.
 RUN firewall-offline-cmd --add-service=ssh && firewall-offline-cmd --add-port=8000/tcp
 
+# Never auto-suspend. This is a KDE desktop image, but the boxes are always-on
+# microscope controllers: an idle suspend would drop seafront (and any running
+# acquisition) and make the box unreachable over the backbone. Masking the sleep
+# targets blocks suspend at the systemd level — independent of KDE/Powerdevil or
+# whether a session is logged in, and permanent across reboots.
+RUN systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target
+
 # bootc/ostree image-mode requirement: a lint pass that the image is bootable.
 RUN bootc container lint || true

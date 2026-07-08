@@ -26,6 +26,12 @@ EOF
         exit 1 ;;
 esac
 
+echo "==> appliance power: never auto-suspend"
+# This gateway is a Kinoite DESKTOP; left alone it suspends after idle and takes the
+# registry, dashboard, Caddy and ssh down with it (the whole fleet control plane goes
+# dark). Mask the sleep targets: DE-independent, permanent, cannot be re-armed by KDE.
+sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target
+
 echo "==> uv (dashboard runtime; installs into ~/.local, base untouched)"
 command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
