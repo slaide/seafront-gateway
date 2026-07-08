@@ -52,6 +52,14 @@ Architecture + rationale: [`docs/immutable-fleet.md`](docs/immutable-fleet.md).
    bash scripts/build-installer.sh        # -> out/bootiso/install.iso
    sudo dd if=out/bootiso/install.iso of=/dev/sdX bs=4M status=progress oflag=sync
    ```
+   > **Write the ISO RAW to the whole device (`dd`), and do NOT use Ventoy or other
+   > multiboot USB loaders.** `dd` gives the stick a standard EFI System Partition, which
+   > every firmware lists. The box hardware (confirmed on the **ASUS PN52**) does *not*
+   > enumerate a Ventoy stick as a boot device — its two-partition exfat+`VTOYEFI` layout
+   > never appears in the boot menu or boot order, even with Secure Boot and Fast Boot off
+   > (the OS still mounts it fine, which makes this look like a media problem when it is
+   > really a firmware/Ventoy incompatibility). `dd of=/dev/sdX` targets the **whole disk**,
+   > not a partition — double-check the device with `lsblk` first.
 
 ## 2 · Each microscope box (once, at the keyboard)
 
