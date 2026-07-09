@@ -1,14 +1,23 @@
 # Narrow, passwordless rule so the gateway (SSHing in as pharmbio with the fleet key)
-# can drive this box — and nothing else. Covers app restart, OS update, and reboot.
-# NB: no `podman pull` rule — a `:` in a command argument is a sudoers group separator
-# and makes the whole file invalid (sudo then IGNORES it). Not needed anyway: the
-# app update is `systemctl restart seafront`, whose quadlet ExecStartPre pulls :stable.
+# can drive this box — and nothing else. Covers the dashboard's image reads, both
+# update routes (OS via bootc, app via podman), app restart, and reboot.
+#
+# IMPORTANT sudoers gotcha: a literal `:` in a command spec is parsed as a
+# host/command-spec separator and INVALIDATES the whole file (sudo then ignores
+# it). The registry ref is 192.168.50.1:5000/... — never write that colon here.
+# Instead match with the `192.168.50.1*` wildcard: fnmatch on arguments does not
+# treat `:` or `/` specially, so it matches the full ref, and the file stays valid.
+# Each entry has a single wildcard-matched trailing arg, like `bootc switch *`.
 pharmbio ALL=(root) NOPASSWD: \
     /usr/bin/systemctl start seafront, \
     /usr/bin/systemctl stop seafront, \
     /usr/bin/systemctl restart seafront, \
     /usr/bin/systemctl status seafront, \
     /usr/bin/systemctl is-active seafront, \
+    /usr/bin/bootc status, \
+    /usr/bin/bootc status *, \
     /usr/bin/bootc upgrade, \
     /usr/bin/bootc switch *, \
+    /usr/bin/podman image inspect 192.168.50.1*, \
+    /usr/bin/podman pull 192.168.50.1*, \
     /usr/sbin/reboot

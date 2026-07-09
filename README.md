@@ -92,12 +92,17 @@ its real profile (placeholder USB IDs) **plus** the `mocroscope` object from
 | **Config** | edit `configs/squid<n>/config.json` → `push-config.sh squid<n>` |
 
 A running acquisition is never disturbed — update the idle boxes, flush the busy one later.
+The per-box step is also a button in the dashboard (§4): it shows each box's OS + app image
+version against the registry, with independent **Update OS** (`bootc upgrade`) and **Update
+seafront** (`podman pull`) actions, so you can roll one route without touching the other.
 
 ## 4 · Remote access (convenience layer)
 
 Caddy on the gateway reverse-proxies `gateway:800<n>` → `squid<n>:8000`; the dashboard
-(`http://<gateway>:8000`) shows per-box health + links + logs. Edit
-`config/microscopes.json` then `bash scripts/apply-config.sh` to change the mapping.
+(`http://<gateway>:8000`) shows per-box health, the OS + seafront image version each box runs
+vs the latest in the registry, per-box **Update OS** / **Update seafront** buttons, and
+links + logs. Edit `config/microscopes.json` then `bash scripts/apply-config.sh` to change
+the mapping.
 This is *only* convenience — the boxes are fully operable locally with it all down.
 
 ## Layout
@@ -109,7 +114,7 @@ configs/mocroscope.profile.json  shared mock profile to merge into each box conf
 images/seafront/          app image Containerfile
 images/kinoite/           box OS image Containerfile + baked files/ tree
 images/gateway/           gateway service quadlets (registry, Caddy)
-scripts/                  gateway-setup, build-images, build-installer, push-config, apply-config, start/stop/status
+scripts/                  gateway-setup, build-images, build-installer, push-config, apply-config, set-static-ip, start/stop/status
 dashboard/  Caddyfile      remote-access layer (dashboard = uv host service; Caddy = quadlet)
 docs/immutable-fleet.md   architecture
 ```
@@ -130,6 +135,10 @@ Unproven — verify on the gateway + one box before flashing the fleet:
 Current limitations:
 - **Kiosk needs a logged-in KDE session** (autologin off) — the UI appears after login.
   Enable SDDM autologin for `pharmbio` to have it come up unattended.
-- **Dashboard stage/flush buttons aren't wired to the image/bootc flow** — drive updates
-  from the CLI (§3); status/logs/restart work.
+- **Dashboard image-version reads + Update buttons need a box already on an image built
+  after this feature landed** — they call `sudo bootc status` / `sudo podman` via the
+  extended fleet sudoers rule (`images/kinoite/files/etc/sudoers.d/seafront-fleet`). Boxes
+  flashed from an earlier image lack that rule, so the dashboard shows their versions as
+  *unknown* until the first `bootc upgrade` rolls the new OS (with its sudoers) onto them.
+  `bootc upgrade` / `reboot` / `restart seafront` work regardless (already in the old rule).
 - **Fleet credential `pharmbio`** is baked into `images/kinoite/installer.toml`.
