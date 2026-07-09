@@ -34,7 +34,7 @@ COPY fleet.pub /etc/ssh/authorized_keys.d/pharmbio
 # Fix modes COPY doesn't guarantee: sudoers must be 0440 or sudo ignores it;
 # the baked scripts must be executable.
 RUN chmod 0440 /etc/sudoers.d/seafront-fleet \
-    && chmod 0755 /usr/bin/box-postinstall /usr/bin/seafront-kiosk \
+    && chmod 0755 /usr/bin/box-postinstall /usr/bin/seafront-kiosk /usr/bin/seafront-run \
     && chmod 0644 /etc/ssh/authorized_keys.d/pharmbio
 
 # Enable remote management + open the ports. Without these the gateway cannot reach

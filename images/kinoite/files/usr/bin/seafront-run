@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Run a command inside a fresh, throwaway seafront container ON THIS BOX, with the
+# same USB/serial passthrough the seafront service uses. For hardware checks and
+# debugging in the exact app environment, without touching (or needing) the running
+# service. The container is --rm, so nothing persists except the mounted state dir.
+#
+#   sudo seafront-run                                     # interactive shell in /app
+#   sudo seafront-run uv run --no-sync scripts/list_squid_hardware.py
+#   sudo seafront-run lsusb
+#
+# Notes:
+#   - uv is preinstalled; use `uv run --no-sync` for python (plain `uv run` re-resolves
+#     dependencies and fails offline). WORKDIR is /app (the seafront source), so script
+#     paths are relative to there.
+#   - the seafront image lives in rootful podman storage, so this needs root; it
+#     re-execs itself under sudo if you forget.
+#   - override the image with SEAFRONT_IMAGE=... if you need a specific tag/digest.
+set -euo pipefail
+[ "$(id -u)" = 0 ] || exec sudo -- "$0" "$@"
+
+IMAGE="${SEAFRONT_IMAGE:-192.168.50.1:5000/seafront:stable}"
+
+# Match the seafront quadlet's device access: the whole USB tree + cgroup rules for
+# usb (major 189, libusb cameras) and ttyACM (166, Teensy serial). label=disable
+# because Kinoite runs SELinux enforcing and would otherwise deny raw device access.
+run=(podman run --rm
+     -v /dev/bus/usb:/dev/bus/usb
+     --device-cgroup-rule='c 189:* rmw'
+     --device-cgroup-rule='c 166:* rmw'
+     --security-opt label=disable
+     -v /home/pharmbio/seafront:/root/seafront
+     --env SEAFRONT_HOME=/root/seafront)
+
+# allocate a TTY only when we actually have one (so piped/non-interactive use works)
+if [ -t 0 ]; then run+=(-it); fi
+
+exec "${run[@]}" "$IMAGE" "${@:-bash}"
