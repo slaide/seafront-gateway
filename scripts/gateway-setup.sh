@@ -71,6 +71,15 @@ sed "s/__DASHBOARD_PORT__/$DASH_PORT/; s#/opt/seafront-gateway#$DIR#g" \
 sudo systemctl daemon-reload
 sudo systemctl enable --now microscope-dashboard
 
+echo "==> dashboard sudoers (lets the dashboard's Reboot-gateway button work)"
+# The dashboard runs as pharmbio. Its git pull + rootless-podman image rebuilds need
+# no sudo (pharmbio owns $DIR and its own podman storage); ONLY rebooting the host
+# does. Grant exactly that, passwordless — nothing else.
+sudo install -m 0440 /dev/stdin /etc/sudoers.d/seafront-gateway <<'EOF'
+pharmbio ALL=(root) NOPASSWD: /usr/sbin/reboot, /usr/bin/systemctl reboot
+EOF
+sudo visudo -cf /etc/sudoers.d/seafront-gateway
+
 echo "==> remote management: enable sshd so the gateway is reachable over ssh"
 # Kinoite ships sshd OFF by default (images/kinoite/Containerfile enables it on the boxes
 # for the same reason). The gateway needs it too, or there is no way in over the network.

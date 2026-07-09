@@ -299,12 +299,12 @@ async def get_logs(name: str, lines: int = 200) -> str:
 JOBS: dict[str, dict] = {}
 
 
-async def _run_job(name: str, argv: list[str]) -> None:
-    job = JOBS[name]
+async def _run_job(key: str, cmd: list[str]) -> None:
+    job = JOBS[key]
     buf: list[str] = []
     try:
         proc = await asyncio.create_subprocess_exec(
-            *(_ssh_base(name) + argv),
+            *cmd,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
         )
         job["proc"] = proc
@@ -319,10 +319,10 @@ async def _run_job(name: str, argv: list[str]) -> None:
                 job["log"] = "".join(buf)
             await proc.wait()
 
-        await asyncio.wait_for(pump(), timeout=600.0)
+        await asyncio.wait_for(pump(), timeout=1800.0)   # image builds can be minutes
         job["rc"] = proc.returncode
     except asyncio.TimeoutError:
-        buf.append("\n[timed out after 600s]\n")
+        buf.append("\n[timed out after 1800s]\n")
         job["rc"] = 124
         if job.get("proc"):
             try:
@@ -338,15 +338,22 @@ async def _run_job(name: str, argv: list[str]) -> None:
         job["proc"] = None
 
 
-def _start_job(name: str, kind: str, argv: list[str]) -> JSONResponse:
-    if name not in BY_NAME:
-        raise HTTPException(404, f"unknown microscope: {name}")
-    j = JOBS.get(name)
+def _start_job(key: str, kind: str, cmd: list[str]) -> JSONResponse:
+    """Launch a streamed background job under `key` (a scope name, or GW_JOB for the
+    gateway). `cmd` is the full argv to exec — an SSH invocation for a box, or a
+    local command for the gateway. One job per key at a time."""
+    j = JOBS.get(key)
     if j and j.get("running"):
-        raise HTTPException(409, f"a job is already running on {name}: {j.get('kind')}")
-    JOBS[name] = {"kind": kind, "running": True, "rc": None, "log": "", "proc": None}
-    asyncio.create_task(_run_job(name, argv))
-    return JSONResponse({"ok": True, "kind": kind, "message": f"{kind} started on {name}"})
+        raise HTTPException(409, f"a job is already running ({j.get('kind')})")
+    JOBS[key] = {"kind": kind, "running": True, "rc": None, "log": "", "proc": None}
+    asyncio.create_task(_run_job(key, cmd))
+    return JSONResponse({"ok": True, "kind": kind})
+
+
+def _job_status(key: str) -> dict:
+    j = JOBS.get(key) or {}
+    return {"running": j.get("running", False), "rc": j.get("rc"),
+            "kind": j.get("kind"), "log": j.get("log", "")}
 
 
 @app.post("/api/scope/{name}/update-os")
@@ -354,7 +361,10 @@ async def update_os(name: str) -> JSONResponse:
     """Download + stage the latest OS image (`bootc upgrade`). Does NOT reboot —
     the box keeps running the current OS until it is rebooted (auto-rollback on a
     bad boot), so this is safe to run and reboot the box later."""
-    return _start_job(name, "update-os", ["sudo", "-n", "/usr/bin/bootc", "upgrade"])
+    if name not in BY_NAME:
+        raise HTTPException(404, f"unknown microscope: {name}")
+    return _start_job(name, "update-os",
+                      _ssh_base(name) + ["sudo", "-n", "/usr/bin/bootc", "upgrade"])
 
 
 @app.post("/api/scope/{name}/update-seafront")
@@ -362,20 +372,88 @@ async def update_seafront(name: str) -> JSONResponse:
     """Pull the latest seafront app image (`podman pull`). Does NOT restart the
     container — a running acquisition keeps its current image until you restart
     the service, which then comes up on the freshly-pulled image."""
-    return _start_job(name, "update-seafront", ["sudo", "-n", "/usr/bin/podman", "pull", APP_IMAGE])
+    if name not in BY_NAME:
+        raise HTTPException(404, f"unknown microscope: {name}")
+    return _start_job(name, "update-seafront",
+                      _ssh_base(name) + ["sudo", "-n", "/usr/bin/podman", "pull", APP_IMAGE])
 
 
 @app.get("/api/scope/{name}/job")
 async def scope_job(name: str) -> JSONResponse:
     if name not in BY_NAME:
         raise HTTPException(404, f"unknown microscope: {name}")
-    j = JOBS.get(name) or {}
+    return JSONResponse(_job_status(name))
+
+
+# --- gateway self-management (this host: git state, image rebuild, reboot) -----
+# The dashboard runs on the gateway as pharmbio, so these are LOCAL commands. git
+# pull + rootless-podman rebuilds need no privilege (pharmbio owns the checkout and
+# its own podman storage); only the host reboot does (NOPASSWD rule from
+# gateway-setup.sh). NB: an image rebuild does not restart THIS dashboard, so a
+# pulled dashboard-code change only takes effect on the next service restart.
+GW_HOST = os.uname().nodename
+GW_JOB = "__gateway__"   # reserved JOBS key; cannot collide with a scope name
+
+
+async def _git(*args: str) -> str:
+    proc = await asyncio.create_subprocess_exec(
+        "git", "-C", str(ROOT), *args,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+    )
+    out, _ = await proc.communicate()
+    return out.decode(errors="replace").strip()
+
+
+@app.get("/api/gateway")
+async def gateway_info() -> JSONResponse:
+    head, subject, dirty, behind = await asyncio.gather(
+        _git("rev-parse", "--short", "HEAD"),
+        _git("log", "-1", "--pretty=%s"),
+        _git("status", "--porcelain"),
+        _git("rev-list", "--count", "HEAD..@{u}"),   # as of last fetch (no network here)
+    )
     return JSONResponse({
-        "running": j.get("running", False),
-        "rc": j.get("rc"),
-        "kind": j.get("kind"),
-        "log": j.get("log", ""),
+        "host": GW_HOST,
+        "git": {
+            "head": head,
+            "subject": subject,
+            "dirty": bool(dirty.strip()),
+            "behind": int(behind) if behind.isdigit() else None,
+        },
+        "rebuild": _job_status(GW_JOB),
     })
+
+
+@app.post("/api/gateway/update")
+async def gateway_update() -> JSONResponse:
+    """Fetch latest git + rebuild BOTH images into the registry. Streamed job;
+    updates the registry only — no box is touched until it is rolled."""
+    cmd = ["bash", "-lc",
+           f"cd {ROOT} && git fetch --all --prune && git pull --ff-only && "
+           "bash scripts/build-images.sh --os --seafront"]
+    return _start_job(GW_JOB, "gateway-update", cmd)
+
+
+@app.get("/api/gateway/job")
+async def gateway_job() -> JSONResponse:
+    return JSONResponse(_job_status(GW_JOB))
+
+
+@app.post("/api/gateway/reboot")
+async def gateway_reboot() -> JSONResponse:
+    # Reboots THIS host; the reply may not flush as the system goes down, so a
+    # dropped connection on the client side is expected/success.
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "sudo", "-n", "/usr/sbin/reboot",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+    except asyncio.TimeoutError:
+        return JSONResponse({"ok": True, "note": "reboot issued (connection dropping)"})
+    if proc.returncode:
+        raise HTTPException(502, f"reboot failed: {out.decode(errors='replace').strip()}")
+    return JSONResponse({"ok": True})
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -397,11 +475,17 @@ HTML = """<!doctype html>
   header { padding: 28px 24px 8px; }
   h1 { margin: 0; font-size: 1.4rem; letter-spacing: .02em; }
   .sub { color: #8b949e; font-size: .9rem; margin-top: 4px; }
-  .registry { margin-top: 12px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-              font-size: .85rem; }
-  .registry label { color: #8b949e; }
-  .registry .hint { color: #6e7681; font-size: .78rem; }
-  .registry .sep { color: #6e7681; }
+  .gateway { margin-top: 14px; padding: 14px 16px; background: #161b22; border: 1px solid #30363d;
+             border-radius: 12px; display: inline-flex; flex-direction: column; gap: 7px;
+             min-width: 360px; }
+  .gwrow { display: flex; align-items: center; gap: 10px; }
+  .gwname { font-size: 1rem; }
+  .flag { font-size: .7rem; padding: 2px 9px; border-radius: 999px; letter-spacing: .05em;
+          text-transform: uppercase; }
+  .flag.idle { background: #21262d; color: #8b949e; border: 1px solid #30363d; }
+  .flag.rebuilding { background: #3a2d09; color: #f0c674; border: 1px solid #bb8009; }
+  .gwbtns { display: flex; gap: 8px; margin-top: 4px; }
+  .gwbtns button { padding: 7px 12px; }
   .ok { color: #3fb950; }
   .stale { color: #d29922; }
   .staged { color: #58a6ff; }
@@ -448,12 +532,17 @@ HTML = """<!doctype html>
 <header>
   <h1>🔬 Microscope Gateway</h1>
   <div class="sub">Fleet status &amp; image updates. Auto-refreshing every 5s.</div>
-  <div class="registry">
-    <label>Registry (latest built):</label>
-    <span class="meta" id="regos">OS …</span>
-    <span class="sep">·</span>
-    <span class="meta" id="regapp">seafront …</span>
-    <span class="hint">rebuild with <code>scripts/build-images.sh</code> on the gateway, then roll out per box below</span>
+  <div class="gateway">
+    <div class="gwrow">
+      <span class="gwname">🖥️ <b id="gwhost">gateway</b></span>
+      <span class="flag idle" id="gwstate">idle</span>
+    </div>
+    <div class="ver" id="gwgit">git …</div>
+    <div class="ver">registry serves — OS <b id="regos">…</b> · seafront <b id="regapp">…</b></div>
+    <div class="gwbtns">
+      <button id="gwrebuild" onclick="gatewayRebuild()">Fetch git + rebuild images</button>
+      <button class="danger" onclick="gatewayReboot()">Reboot gateway</button>
+    </div>
   </div>
 </header>
 <div class="grid" id="grid"></div>
@@ -556,6 +645,52 @@ async function pollJob(name) {
     else { box.textContent += `\\n\\n--- finished (exit ${j.rc}) ---`; box.scrollTop = box.scrollHeight; fetchImages(); }
   } catch (e) { box.textContent += '\\npoll error: ' + e; }
 }
+
+async function fetchGateway() {
+  try {
+    const g = await (await fetch('/api/gateway')).json();
+    document.getElementById('gwhost').textContent = g.host || 'gateway';
+    const gi = g.git || {};
+    let s = gi.head ? (gi.head + (gi.subject ? ' · ' + gi.subject : '')) : '?';
+    if (gi.behind) s += '  · ' + gi.behind + ' behind origin';
+    if (gi.dirty) s += '  · ⚠ dirty';
+    document.getElementById('gwgit').textContent = 'git ' + s;
+    const rebuilding = !!(g.rebuild && g.rebuild.running);
+    const flag = document.getElementById('gwstate');
+    flag.textContent = rebuilding ? 'rebuilding' : 'idle';
+    flag.className = 'flag ' + (rebuilding ? 'rebuilding' : 'idle');
+    document.getElementById('gwrebuild').disabled = rebuilding;
+  } catch (e) { /* leave last-known */ }
+}
+async function gatewayRebuild() {
+  if (!confirm('Fetch latest git + rebuild BOTH images on the gateway?\\n\\nUpdates the registry only — no box is touched. Takes several minutes.')) return;
+  openModal('Gateway — fetch git + rebuild images');
+  let r;
+  try { r = await fetch('/api/gateway/update', {method: 'POST'}); }
+  catch (e) { document.getElementById('modalbody').textContent = 'request failed: ' + e; return; }
+  if (!r.ok) {
+    const j = await r.json().catch(() => ({}));
+    document.getElementById('modalbody').textContent = 'error: ' + (j.detail || r.status);
+    return;
+  }
+  fetchGateway();
+  pollGatewayJob();
+}
+async function pollGatewayJob() {
+  const box = document.getElementById('modalbody');
+  try {
+    const j = await (await fetch('/api/gateway/job')).json();
+    box.textContent = j.log || '(starting…)';
+    box.scrollTop = box.scrollHeight;
+    if (j.running) { setTimeout(pollGatewayJob, 1500); }
+    else { box.textContent += `\\n\\n--- finished (exit ${j.rc}) ---`; box.scrollTop = box.scrollHeight; fetchGateway(); fetchImages(); }
+  } catch (e) { box.textContent += '\\npoll error: ' + e; }
+}
+async function gatewayReboot() {
+  if (!confirm('Reboot the GATEWAY (' + (document.getElementById('gwhost').textContent) + ')?\\n\\nDrops the whole control plane (dashboard, registry, proxy) for ~1 min. Boxes keep running locally.')) return;
+  toast('gateway: rebooting…');
+  try { await fetch('/api/gateway/reboot', {method: 'POST'}); } catch (e) { /* connection drops as it goes down */ }
+}
 function updateOs(name) {
   const reg = (IMAGES.registry.os || {});
   const to = reg.version || short(reg.digest);
@@ -611,8 +746,10 @@ async function refresh() {
     `${hostUp}/${data.length} computers up · ${svcUp}/${data.length} services running · updated ${new Date().toLocaleTimeString()}`;
 }
 fetchImages();
+fetchGateway();
 setInterval(refresh, 5000);
 setInterval(fetchImages, 30000);   // image info needs SSH per box — poll gently
+setInterval(fetchGateway, 15000);  // gateway git/rebuild state (local, cheap)
 </script>
 </body>
 </html>"""
