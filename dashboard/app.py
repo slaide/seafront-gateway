@@ -57,6 +57,30 @@ APP_IMAGE = f"{REGISTRY}/{APP_REPO}:stable"
 
 SYSTEMCTL = "/usr/bin/systemctl"
 
+
+def _browse_url(u: str) -> str:
+    """Normalize a git remote (https or git@) to a browsable https URL."""
+    u = (u or "").strip()
+    if u.startswith("git@"):
+        u = u.replace(":", "/", 1).replace("git@", "https://", 1)
+    return u[:-4] if u.endswith(".git") else u
+
+
+def _seafront_repo_url() -> str | None:
+    """The seafront source repo the app image is built from (single source of
+    truth: the SEAFRONT_REPO arg in images/seafront/Containerfile)."""
+    cf = ROOT / "images" / "seafront" / "Containerfile"
+    try:
+        for line in cf.read_text().splitlines():
+            if line.strip().startswith("ARG SEAFRONT_REPO="):
+                return _browse_url(line.split("=", 1)[1])
+    except Exception:
+        pass
+    return None
+
+
+SEAFRONT_REPO_URL = _seafront_repo_url()
+
 app = FastAPI(title="Microscope Gateway")
 
 
@@ -413,11 +437,12 @@ async def _git(*args: str) -> str:
 
 @app.get("/api/gateway")
 async def gateway_info() -> JSONResponse:
-    head, subject, dirty, behind = await asyncio.gather(
+    head, subject, dirty, behind, origin = await asyncio.gather(
         _git("rev-parse", "--short", "HEAD"),
         _git("log", "-1", "--pretty=%s"),
         _git("status", "--porcelain"),
         _git("rev-list", "--count", "HEAD..@{u}"),   # as of last fetch (no network here)
+        _git("remote", "get-url", "origin"),
     )
     return JSONResponse({
         "host": GW_HOST,
@@ -426,6 +451,10 @@ async def gateway_info() -> JSONResponse:
             "subject": subject,
             "dirty": bool(dirty.strip()),
             "behind": int(behind) if behind.isdigit() else None,
+        },
+        "repos": {
+            "gateway": _browse_url(origin) if origin.startswith(("http", "git@")) else None,
+            "seafront": SEAFRONT_REPO_URL,
         },
         "rebuild": _job_status(GW_JOB),
     })
@@ -493,6 +522,8 @@ HTML = """<!doctype html>
   .flag.rebuilding { background: #3a2d09; color: #f0c674; border: 1px solid #bb8009; }
   .gwbtns { display: flex; gap: 8px; margin-top: 4px; }
   .gwbtns button { padding: 7px 12px; }
+  .repolink { color: #58a6ff; text-decoration: none; }
+  .repolink:hover { text-decoration: underline; }
   .ok { color: #3fb950; }
   .stale { color: #d29922; }
   .staged { color: #58a6ff; }
@@ -546,6 +577,7 @@ HTML = """<!doctype html>
     </div>
     <div class="ver" id="gwgit">git …</div>
     <div class="ver">registry serves — OS <b id="regos">…</b> · seafront <b id="regapp">…</b></div>
+    <div class="ver">repos — <a id="repogw" class="repolink" target="_blank" rel="noopener">seafront-gateway</a> · <a id="reposf" class="repolink" target="_blank" rel="noopener">seafront</a></div>
     <div class="gwbtns">
       <button id="gwrebuild" onclick="gatewayRebuild()">Fetch git + rebuild images</button>
       <button class="danger" onclick="gatewayReboot()">Reboot gateway</button>
@@ -662,6 +694,9 @@ async function fetchGateway() {
     if (gi.behind) s += '  · ' + gi.behind + ' behind origin';
     if (gi.dirty) s += '  · ⚠ dirty';
     document.getElementById('gwgit').textContent = 'git ' + s;
+    const rp = g.repos || {};
+    if (rp.gateway) document.getElementById('repogw').href = rp.gateway;
+    if (rp.seafront) document.getElementById('reposf').href = rp.seafront;
     const rebuilding = !!(g.rebuild && g.rebuild.running);
     const flag = document.getElementById('gwstate');
     flag.textContent = rebuilding ? 'rebuilding' : 'idle';
