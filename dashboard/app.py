@@ -105,7 +105,14 @@ def _ssh_base(name: str) -> list[str]:
     return [
         "ssh", "-i", SSH_KEY,
         "-o", "BatchMode=yes",                    # never hang on a password prompt
-        "-o", "StrictHostKeyChecking=accept-new",
+        # The boxes sit on an isolated, trusted backbone and are RE-IMAGED regularly,
+        # so their SSH host keys rotate every install. Pinning keys (accept-new) then
+        # hard-fails with "REMOTE HOST IDENTIFICATION HAS CHANGED" after a reflash —
+        # which broke Update-OS on a reinstalled box. There is no meaningful MITM
+        # surface on this switch, so don't pin or persist host keys.
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "LogLevel=ERROR",                   # drop the "added to known hosts" warning
         "-o", "ConnectTimeout=5",
         f"{SSH_USER}@{m['host']}", "--",
     ]
