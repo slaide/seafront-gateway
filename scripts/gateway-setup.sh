@@ -71,12 +71,16 @@ sed "s/__DASHBOARD_PORT__/$DASH_PORT/; s#/opt/seafront-gateway#$DIR#g" \
 sudo systemctl daemon-reload
 sudo systemctl enable --now microscope-dashboard
 
-echo "==> dashboard sudoers (lets the dashboard's Reboot-gateway button work)"
+echo "==> dashboard sudoers (reboot + the self-elevating fleet scripts)"
 # The dashboard runs as pharmbio. Its git pull + rootless-podman image rebuilds need
-# no sudo (pharmbio owns $DIR and its own podman storage); ONLY rebooting the host
-# does. Grant exactly that, passwordless — nothing else.
-sudo install -m 0440 /dev/stdin /etc/sudoers.d/seafront-gateway <<'EOF'
-pharmbio ALL=(root) NOPASSWD: /usr/sbin/reboot, /usr/bin/systemctl reboot
+# no sudo (pharmbio owns $DIR and its own podman storage). What DOES need root:
+# rebooting the host, applying config (write /etc/caddy, restart caddy, firewalld), and
+# toggling Wi-Fi. apply-config.sh and wifi-mode.sh self-elevate; grant pharmbio those
+# two scripts (bare + with args) passwordless so the non-tty dashboard can run them —
+# and nothing else. Args are matched with a trailing '*'; avoid ':' in any argument
+# (SSIDs/passwords), which sudoers parses as a host/command separator.
+sudo install -m 0440 /dev/stdin /etc/sudoers.d/seafront-gateway <<EOF
+pharmbio ALL=(root) NOPASSWD: /usr/sbin/reboot, /usr/bin/systemctl reboot, $DIR/scripts/apply-config.sh, $DIR/scripts/apply-config.sh *, $DIR/scripts/wifi-mode.sh, $DIR/scripts/wifi-mode.sh *
 EOF
 sudo visudo -cf /etc/sudoers.d/seafront-gateway
 
@@ -94,3 +98,9 @@ if command -v firewall-cmd >/dev/null; then
 fi
 
 echo "==> gateway ready. next (with internet):  scripts/build-images.sh"
+# Wi-Fi is intentionally left in whatever mode it is in now — during setup and the
+# build-images step below the gateway needs its client-mode internet. Once images are
+# built, run `scripts/wifi-mode.sh ap` to become the hotspot laptops connect to; that
+# choice then persists across reboots (NetworkManager autoconnect). Flip back with
+# `scripts/wifi-mode.sh client` whenever you need internet to rebuild images.
+echo "==> Wi-Fi: left as-is (client/internet). After build-images: scripts/wifi-mode.sh ap"

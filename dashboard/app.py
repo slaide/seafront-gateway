@@ -28,18 +28,35 @@ Config comes from ../config/microscopes.json (shared with the Caddyfile
 generator), so there is one source of truth.
 """
 import asyncio
+import ipaddress
 import json
 import os
 import pathlib
+import sys
 
 import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from pydantic import BaseModel
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-CONFIG = json.loads((ROOT / "config" / "microscopes.json").read_text())
-MICROSCOPES = CONFIG["microscopes"]
-BY_NAME = {m["name"]: m for m in MICROSCOPES}
+SCRIPTS = ROOT / "scripts"
+sys.path.insert(0, str(SCRIPTS))
+import fleet_config  # noqa: E402  single source of truth for the inventory (pure stdlib)
+
+
+# The inventory is read FRESH on every request (no import-time snapshot), so add /
+# remove / renumber — from the CLI scripts OR the dashboard's own write endpoints below
+# — take effect immediately with no dashboard restart.
+def scopes() -> list[dict]:
+    return fleet_config.load()["microscopes"]
+
+
+def scope_or_404(name: str) -> dict:
+    m = fleet_config.by_name(fleet_config.load(), name)
+    if m is None:
+        raise HTTPException(404, f"unknown microscope: {name}")
+    return m
 
 # SSH identity the dashboard uses to reach the scopes (baked into the box image as
 # the gateway's fleet key). Overridable via env for testing.
@@ -123,9 +140,7 @@ async def _check(client: httpx.AsyncClient, m: dict) -> dict:
 
 # --- SSH plumbing for on-demand actions + image queries ------------------------
 def _ssh_base(name: str) -> list[str]:
-    m = BY_NAME.get(name)
-    if m is None:
-        raise HTTPException(404, f"unknown microscope: {name}")
+    m = scope_or_404(name)
     return [
         "ssh", "-i", SSH_KEY,
         "-o", "BatchMode=yes",                    # never hang on a password prompt
@@ -261,7 +276,7 @@ async def images() -> JSONResponse:
     async with httpx.AsyncClient() as client:
         (reg_os, reg_app), boxes = await asyncio.gather(
             asyncio.gather(_registry_image(client, OS_REPO), _registry_image(client, APP_REPO)),
-            asyncio.gather(*[_box_images(m["name"]) for m in MICROSCOPES]),
+            asyncio.gather(*[_box_images(m["name"]) for m in scopes()]),
         )
     for b in boxes:
         osd, appd = b["os"], b["seafront"]
@@ -275,13 +290,13 @@ async def images() -> JSONResponse:
 
 @app.get("/api/microscopes")
 async def microscopes() -> JSONResponse:
-    return JSONResponse(MICROSCOPES)
+    return JSONResponse(scopes())
 
 
 @app.get("/api/status")
 async def status() -> JSONResponse:
     async with httpx.AsyncClient() as client:
-        results = await asyncio.gather(*[_check(client, m) for m in MICROSCOPES])
+        results = await asyncio.gather(*[_check(client, m) for m in scopes()])
     return JSONResponse(list(results))
 
 
@@ -392,8 +407,7 @@ async def update_os(name: str) -> JSONResponse:
     """Download + stage the latest OS image (`bootc upgrade`). Does NOT reboot —
     the box keeps running the current OS until it is rebooted (auto-rollback on a
     bad boot), so this is safe to run and reboot the box later."""
-    if name not in BY_NAME:
-        raise HTTPException(404, f"unknown microscope: {name}")
+    scope_or_404(name)
     return _start_job(name, "update-os",
                       _ssh_base(name) + ["sudo", "-n", "/usr/bin/bootc", "upgrade"])
 
@@ -403,16 +417,14 @@ async def update_seafront(name: str) -> JSONResponse:
     """Pull the latest seafront app image (`podman pull`). Does NOT restart the
     container — a running acquisition keeps its current image until you restart
     the service, which then comes up on the freshly-pulled image."""
-    if name not in BY_NAME:
-        raise HTTPException(404, f"unknown microscope: {name}")
+    scope_or_404(name)
     return _start_job(name, "update-seafront",
                       _ssh_base(name) + ["sudo", "-n", "/usr/bin/podman", "pull", APP_IMAGE])
 
 
 @app.get("/api/scope/{name}/job")
 async def scope_job(name: str) -> JSONResponse:
-    if name not in BY_NAME:
-        raise HTTPException(404, f"unknown microscope: {name}")
+    scope_or_404(name)
     return JSONResponse(_job_status(name))
 
 
@@ -433,6 +445,31 @@ async def _git(*args: str) -> str:
     )
     out, _ = await proc.communicate()
     return out.decode(errors="replace").strip()
+
+
+async def _run_local(argv: list[str], timeout: float = 30.0) -> tuple[int, str, str]:
+    """Run a local gateway command (not SSH): apply-config, wifi-mode, nmcli. The
+    privileged scripts self-elevate via the fleet sudoers rule, so no sudo here."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        raise HTTPException(504, f"command timed out: {' '.join(argv)}")
+    except FileNotFoundError:
+        raise HTTPException(500, f"command not found: {argv[0]}")
+    return proc.returncode or 0, out.decode(errors="replace"), err.decode(errors="replace")
+
+
+async def _internet_ok() -> bool:
+    """True when the gateway has real upstream connectivity (needed to rebuild images).
+    Wi-Fi in AP/hotspot mode has none."""
+    try:
+        _rc, out, _ = await _run_local(
+            ["nmcli", "-t", "-f", "CONNECTIVITY", "general", "status"], timeout=6.0)
+    except HTTPException:
+        return False
+    return out.strip() == "full"
 
 
 @app.get("/api/gateway")
@@ -464,6 +501,11 @@ async def gateway_info() -> JSONResponse:
 async def gateway_update() -> JSONResponse:
     """Fetch latest git + rebuild BOTH images into the registry. Streamed job;
     updates the registry only — no box is touched until it is rolled."""
+    # Rebuilding pulls from the internet. If the gateway's single Wi-Fi radio is in
+    # AP/hotspot mode it has no upstream, so fail fast with the fix instead of hanging.
+    if not await _internet_ok():
+        raise HTTPException(409, "gateway has no internet (Wi-Fi in hotspot/AP mode?). "
+                                 "Switch Wi-Fi to client mode, then rebuild.")
     cmd = ["bash", "-lc",
            f"cd {ROOT} && git fetch --all --prune && git pull --ff-only && "
            "bash scripts/build-images.sh --os --seafront"]
@@ -490,6 +532,105 @@ async def gateway_reboot() -> JSONResponse:
     if proc.returncode:
         raise HTTPException(502, f"reboot failed: {out.decode(errors='replace').strip()}")
     return JSONResponse({"ok": True})
+
+
+# --- fleet inventory writes (add / remove / renumber) --------------------------
+# The dashboard is unauthenticated and admin-level by design: anyone who can reach it
+# can change the fleet. These edit config/microscopes.json (pharmbio owns the checkout),
+# then run apply-config.sh --no-dashboard, which self-elevates via the fleet sudoers rule
+# to reload Caddy + the firewall WITHOUT restarting this dashboard (it reads live).
+class ScopeIn(BaseModel):
+    name: str
+    host: str
+    proxy_port: int | None = None
+    seafront_port: int = 8000
+    type: str = "squid"
+
+
+class IpIn(BaseModel):
+    ip: str
+
+
+class WifiIn(BaseModel):
+    mode: str                     # "ap" | "client"
+    ssid: str | None = None
+    password: str | None = None
+
+
+async def _apply_config() -> None:
+    rc, out, err = await _run_local(
+        [str(SCRIPTS / "apply-config.sh"), "--no-dashboard"], timeout=120.0)
+    if rc != 0:
+        raise HTTPException(500, f"apply-config failed: {(err or out).strip()}")
+
+
+@app.post("/api/fleet/scope")
+async def fleet_add_scope(s: ScopeIn) -> JSONResponse:
+    cfg = fleet_config.load()
+    try:
+        entry = fleet_config.add_scope(cfg, s.name, s.host, s.proxy_port, s.seafront_port, s.type)
+        fleet_config.save(cfg)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    await _apply_config()
+    return JSONResponse({"ok": True, "scope": entry})
+
+
+@app.delete("/api/fleet/scope/{name}")
+async def fleet_remove_scope(name: str) -> JSONResponse:
+    cfg = fleet_config.load()
+    try:
+        fleet_config.remove_scope(cfg, name)
+        fleet_config.save(cfg)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    await _apply_config()
+    return JSONResponse({"ok": True, "removed": name})
+
+
+@app.post("/api/scope/{name}/set-ip")
+async def scope_set_ip(name: str, body: IpIn) -> JSONResponse:
+    """Renumber a box's backbone IP over SSH (set-box-ip.sh: add-new / verify / drop-old,
+    then update the inventory + reload the proxy). Streamed as a per-box job."""
+    scope_or_404(name)
+    try:
+        ipaddress.ip_address(body.ip.split("/")[0])
+    except ValueError:
+        raise HTTPException(400, f"invalid ip: {body.ip}")
+    return _start_job(name, "set-ip", [str(SCRIPTS / "set-box-ip.sh"), name, body.ip])
+
+
+# --- Wi-Fi control -------------------------------------------------------------
+def _parse_kv(text: str) -> dict:
+    d: dict[str, str] = {}
+    for line in text.splitlines():
+        if ":" in line:
+            k, v = line.split(":", 1)
+            d[k.strip()] = v.strip()
+    return d
+
+
+@app.get("/api/wifi")
+async def wifi_status() -> JSONResponse:
+    _rc, out, _err = await _run_local([str(SCRIPTS / "wifi-mode.sh"), "status"], timeout=15.0)
+    return JSONResponse(_parse_kv(out))
+
+
+@app.post("/api/wifi/mode")
+async def wifi_set_mode(w: WifiIn) -> JSONResponse:
+    if w.mode not in ("ap", "client"):
+        raise HTTPException(400, "mode must be 'ap' or 'client'")
+    argv = [str(SCRIPTS / "wifi-mode.sh"), w.mode]
+    if w.mode == "client" and w.ssid:
+        argv.append(w.ssid)
+        if w.password:
+            argv.append(w.password)
+    # wifi-mode.sh self-elevates and detaches the actual switch (systemd-run), so this
+    # returns promptly even though the radio flip may drop the caller's own connection.
+    rc, out, err = await _run_local(argv, timeout=30.0)
+    if rc != 0:
+        raise HTTPException(500, f"wifi switch failed: {(err or out).strip()}")
+    return JSONResponse({"ok": True, "scheduled": w.mode, "note": out.strip()})
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -529,7 +670,8 @@ HTML = """<!doctype html>
   .staged { color: #58a6ff; }
   .muted { color: #6e7681; }
   button.hot { border-color: #bb8009; color: #f0c674; }
-  .grid { display: grid; gap: 16px; padding: 24px;
+  .toolbar { padding: 0 24px; }
+  .grid { display: grid; gap: 16px; padding: 16px 24px 24px;
           grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
   .card { background: #161b22; border: 1px solid #30363d; border-radius: 12px;
           padding: 18px; display: flex; flex-direction: column; gap: 10px; }
@@ -578,12 +720,18 @@ HTML = """<!doctype html>
     <div class="ver" id="gwgit">git …</div>
     <div class="ver">registry serves — OS <b id="regos">…</b> · seafront <b id="regapp">…</b></div>
     <div class="ver">repos — <a id="repogw" class="repolink" target="_blank" rel="noopener">seafront-gateway</a> · <a id="reposf" class="repolink" target="_blank" rel="noopener">seafront</a></div>
+    <div class="ver" id="gwwifi">wifi …</div>
+    <div class="gwbtns">
+      <button id="wifiap" onclick="setWifi('ap')">📶 Wi-Fi: Hotspot</button>
+      <button id="wificlient" onclick="setWifi('client')">🌐 Wi-Fi: Client (internet)</button>
+    </div>
     <div class="gwbtns">
       <button id="gwrebuild" onclick="gatewayRebuild()">Fetch git + rebuild images</button>
       <button class="danger" onclick="gatewayReboot()">Reboot gateway</button>
     </div>
   </div>
 </header>
+<div class="toolbar"><button onclick="addScope()">➕ Add microscope</button></div>
 <div class="grid" id="grid"></div>
 <footer id="foot">loading…</footer>
 
@@ -701,8 +849,89 @@ async function fetchGateway() {
     const flag = document.getElementById('gwstate');
     flag.textContent = rebuilding ? 'rebuilding' : 'idle';
     flag.className = 'flag ' + (rebuilding ? 'rebuilding' : 'idle');
-    document.getElementById('gwrebuild').disabled = rebuilding;
+    const rb = document.getElementById('gwrebuild');
+    rb.dataset.rebuilding = rebuilding ? '1' : '';
+    updateRebuildBtn();
   } catch (e) { /* leave last-known */ }
+}
+// Rebuild is blocked while a rebuild runs OR while the gateway has no internet (Wi-Fi
+// in AP mode). fetchGateway and fetchWifi each own one flag; this reconciles both.
+function updateRebuildBtn() {
+  const rb = document.getElementById('gwrebuild');
+  if (!rb) return;
+  rb.disabled = !!rb.dataset.rebuilding || rb.dataset.nonet === '1';
+  rb.title = rb.dataset.nonet === '1' ? 'Needs internet — switch Wi-Fi to Client mode first' : '';
+}
+async function fetchWifi() {
+  try {
+    const w = await (await fetch('/api/wifi')).json();
+    const net = (w.internet || '').startsWith('yes');
+    let s = 'Wi-Fi: ' + (w.mode || '?');
+    if (w.ssid) s += ' · ' + w.ssid;
+    if (w.mode === 'ap' && w['ap-clients']) s += ' · ' + w['ap-clients'] + ' client(s)';
+    s += ' · internet ' + (net ? 'yes' : 'no');
+    document.getElementById('gwwifi').textContent = s;
+    document.getElementById('wifiap').disabled = (w.mode === 'ap');
+    document.getElementById('wificlient').disabled = (w.mode === 'client' && net);
+    const rb = document.getElementById('gwrebuild');
+    if (rb) { rb.dataset.nonet = net ? '' : '1'; updateRebuildBtn(); }
+  } catch (e) { /* leave last-known */ }
+}
+async function setWifi(mode) {
+  const body = { mode };
+  if (mode === 'ap') {
+    if (!confirm('Switch Wi-Fi to HOTSPOT (AP)?\\n\\nLaptops can join the "microscopes" network to reach this dashboard, but the gateway LOSES internet (no image rebuilds until you switch back). If you are connected over the gateway current Wi-Fi, that link drops — reconnect to the hotspot. The wired backbone and squidway.local stay reachable.')) return;
+  } else {
+    if (!confirm('Switch Wi-Fi to CLIENT (internet)?\\n\\nThe gateway rejoins an external Wi-Fi for internet (needed to rebuild images). The "microscopes" hotspot goes DOWN, so laptops on it lose the dashboard until you switch back. Reach the gateway over the wired backbone or squidway.local meanwhile.')) return;
+    const ssid = prompt('Client Wi-Fi SSID to join (blank = use a network the gateway already knows):', '');
+    if (ssid === null) return;
+    if (ssid) { body.ssid = ssid; const pw = prompt('Password for "' + ssid + '" (blank if open / already saved):', ''); if (pw) body.password = pw; }
+  }
+  toast('Wi-Fi: switching to ' + mode + '… (may take ~20s; your link may drop)');
+  try {
+    const r = await fetch('/api/wifi/mode', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+    const j = await r.json().catch(() => ({}));
+    toast(r.ok ? ('Wi-Fi: ' + mode + ' scheduled') : ('Wi-Fi failed — ' + (j.detail || r.status)));
+  } catch (e) { toast('Wi-Fi request sent; link may have dropped — reconnect and check status'); }
+  setTimeout(fetchWifi, 8000);
+}
+async function addScope() {
+  const name = prompt('New microscope name (e.g. squid5):');
+  if (!name) return;
+  const host = prompt('Backbone IP (inside the backbone subnet, e.g. 192.168.50.15):');
+  if (!host) return;
+  const pp = prompt('Proxy port (blank = auto-assign next free):', '');
+  const body = { name: name.trim(), host: host.trim() };
+  if (pp && pp.trim()) body.proxy_port = parseInt(pp.trim(), 10);
+  toast('adding ' + name + '…');
+  try {
+    const r = await fetch('/api/fleet/scope', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+    const j = await r.json().catch(() => ({}));
+    toast(r.ok ? ('added ' + name + ' → proxy :' + (j.scope && j.scope.proxy_port)) : ('add failed — ' + (j.detail || r.status)));
+  } catch (e) { toast('add failed — ' + e); }
+  setTimeout(() => { refresh(); fetchImages(); }, 1000);
+}
+async function removeScope(name) {
+  if (!confirm('Remove ' + name + ' from the fleet?\\n\\nDe-registers it from the proxy + dashboard. Does not touch the box itself.')) return;
+  toast('removing ' + name + '…');
+  try {
+    const r = await fetch('/api/fleet/scope/' + name, {method: 'DELETE'});
+    const j = await r.json().catch(() => ({}));
+    toast(r.ok ? (name + ' removed') : ('remove failed — ' + (j.detail || r.status)));
+  } catch (e) { toast('remove failed — ' + e); }
+  setTimeout(() => { refresh(); fetchImages(); }, 1000);
+}
+function changeIp(name) {
+  const ip = prompt('New backbone IP for ' + name + ' (inside the backbone subnet):');
+  if (!ip) return;
+  if (!confirm('Renumber ' + name + ' to ' + ip + '?\\n\\nApplies the new IP on the box over SSH — keeps the old address until the new one is confirmed, and auto-reverts on failure — then re-points the proxy. Takes ~30s.')) return;
+  openModal('Renumber ' + name + ' → ' + ip);
+  fetch('/api/scope/' + name + '/set-ip', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ip})})
+    .then(async r => {
+      if (!r.ok) { const j = await r.json().catch(() => ({})); document.getElementById('modalbody').textContent = 'error: ' + (j.detail || r.status); return; }
+      pollJob(name);
+    })
+    .catch(e => { document.getElementById('modalbody').textContent = 'request failed: ' + e; });
 }
 async function gatewayRebuild() {
   if (!confirm('Fetch latest git + rebuild BOTH images on the gateway?\\n\\nUpdates the registry only — no box is touched. Takes several minutes.')) return;
@@ -776,6 +1005,8 @@ async function refresh() {
         <button onclick="view('${m.name}','logs')">View logs</button>
         <button class="${osStale ? 'hot' : ''}" onclick="updateOs('${m.name}')">Update OS</button>
         <button class="${appStale ? 'hot' : ''}" onclick="updateApp('${m.name}')">Update seafront</button>
+        <button onclick="changeIp('${m.name}')">Change IP</button>
+        <button class="danger" onclick="removeScope('${m.name}')">Remove</button>
         <button class="danger" style="grid-column:1/3"
           onclick="act('${m.name}','reboot','Reboot ${m.name} (${m.host})? This interrupts anything running on it.')">
           Reboot computer</button>
@@ -789,9 +1020,11 @@ async function refresh() {
 }
 fetchImages();
 fetchGateway();
+fetchWifi();
 setInterval(refresh, 5000);
 setInterval(fetchImages, 30000);   // image info needs SSH per box — poll gently
 setInterval(fetchGateway, 15000);  // gateway git/rebuild state (local, cheap)
+setInterval(fetchWifi, 15000);     // gateway Wi-Fi mode + internet reachability
 </script>
 </body>
 </html>"""
