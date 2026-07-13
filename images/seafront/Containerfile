@@ -38,6 +38,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # can move to e.g. /var/seafront.)
 ENV SEAFRONT_HOME=/root/seafront
 # Which profile in config.json to run. Default = mock until real hardware is wired.
+# A per-box override file on the mounted writable dir (/root/seafront/active_microscope,
+# i.e. ~pharmbio/seafront/active_microscope on the host) takes precedence when present —
+# so the gateway can switch profiles by writing that file + `systemctl restart seafront`,
+# with no image rebuild, no /etc edit, and no sudo beyond the restart it already has.
 ENV SEAFRONT_MICROSCOPE=mocroscope
 
 EXPOSE 8000
@@ -47,4 +51,4 @@ EXPOSE 8000
 # dashboard), and podman PublishPort reaches this socket over IPv4 on the IPv4-only
 # backbone — `::` would leave seafront reachable only on the box's own ::1 (kiosk) while
 # the gateway/Caddy proxy to <box>:8000 gets connection-refused (502).
-CMD ["sh", "-c", "exec uv run --no-sync python -m seafront --microscope \"$SEAFRONT_MICROSCOPE\" --host 0.0.0.0 --port 8000"]
+CMD ["sh", "-c", "M=\"$SEAFRONT_MICROSCOPE\"; [ -s /root/seafront/active_microscope ] && M=\"$(cat /root/seafront/active_microscope)\"; exec uv run --no-sync python -m seafront --microscope \"$M\" --host 0.0.0.0 --port 8000"]
