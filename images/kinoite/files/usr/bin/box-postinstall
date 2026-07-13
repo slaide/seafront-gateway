@@ -4,12 +4,21 @@
 # (SSH trust, registry trust, the seafront service, kiosk) is already baked into the
 # image, so this only sets hostname + static IP.
 #
-#   sudo box-postinstall <n>     # n = box number: hostname squid<n>, IP 192.168.50.1<n>
+# The name + IP come from the gateway inventory (config/microscopes.json) — this is
+# the ONE bootstrap step the gateway can't do for you, because a box with no address
+# is invisible on the (DHCP-less) backbone until this runs. Copy the box's name and
+# host from the inventory and pass them here; they must match, or the gateway's proxy
+# and dashboard will point at the wrong address.
+#
+#   sudo box-postinstall <name> <ip>[/prefix]     # /24 assumed if no prefix
+#   sudo box-postinstall squid3 192.168.50.13     # hostname squid3, 192.168.50.13/24
 set -euo pipefail
 [ "$(id -u)" = 0 ] || { echo "run with sudo"; exit 1; }
-N="${1:?usage: box-postinstall <n>   (e.g. 1 -> squid1 / 192.168.50.11)}"
-IP="192.168.50.1${N}"
-NAME="squid${N}"
+
+NAME="${1:?usage: box-postinstall <name> <ip>[/prefix]   (e.g. squid3 192.168.50.13)}"
+ADDR="${2:?usage: box-postinstall <name> <ip>[/prefix]   (e.g. squid3 192.168.50.13)}"
+# split IP/prefix; default to /24 (the backbone) when none is given
+if [[ "$ADDR" == */* ]]; then PREFIX="${ADDR#*/}"; IP="${ADDR%/*}"; else PREFIX="24"; IP="$ADDR"; fi
 
 # first wired (type==1, non-wireless) NIC
 NIC=""
@@ -20,15 +29,19 @@ for d in /sys/class/net/*; do
 done
 [ -n "$NIC" ] || { echo "!! no wired NIC found"; exit 1; }
 
-echo "==> $NAME -> $IP on $NIC (backbone has no DHCP: pinning static)"
+echo "==> $NAME -> $IP/$PREFIX on $NIC (backbone has no DHCP: pinning static)"
 hostnamectl set-hostname "$NAME"
+# Same nmcli shape as scripts/set-static-ip.sh: manual method, autoconnect so it
+# reactivates on cable insert. The backbone is the box's only link (no Wi-Fi), so we
+# leave the default route on it — there is no internet either way.
 if nmcli -g GENERAL.CONNECTION device show "$NIC" | grep -q .; then
     CON="$(nmcli -g GENERAL.CONNECTION device show "$NIC")"
-    nmcli connection modify "$CON" ipv4.method manual ipv4.addresses "$IP/24"
+    nmcli connection modify "$CON" \
+        ipv4.method manual ipv4.addresses "$IP/$PREFIX" connection.autoconnect yes
     nmcli connection up "$CON"
 else
     nmcli connection add type ethernet ifname "$NIC" con-name backbone \
-        ipv4.method manual ipv4.addresses "$IP/24"
+        ipv4.method manual ipv4.addresses "$IP/$PREFIX" connection.autoconnect yes
     nmcli connection up backbone
 fi
 
