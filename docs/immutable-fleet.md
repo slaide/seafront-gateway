@@ -12,6 +12,9 @@ machine that ever needs the internet, and only when *you* choose to give it.
   **seafront app image**. Its own services are podman quadlets (registry, Caddy) plus a
   `uv` dashboard host service — no packages layered on the immutable base. It builds and
   serves the images; it doesn't need the box image itself (no microscope hardware).
+  Its single Wi-Fi radio runs as a **hotspot** by default (laptops connect to it to
+  reach the dashboard) and flips to **client** only when you hand it internet to refresh
+  images — the two are mutually exclusive on one radio (`scripts/wifi-mode.sh`).
 - **Boxes `squid1–4`** (Kinoite, no internet) — immutable desktop appliances.
   Track the gateway's OS image via **bootc**; run seafront as a **podman**
   container from the gateway registry, serving `localhost:8000`. Local KDE desktop
@@ -65,12 +68,16 @@ machine that ever needs the internet, and only when *you* choose to give it.
   the internet.
 
 ## The only per-box mutable state
-Everything above (OS + app) is immutable and **identical fleet-wide**. Only two
-small things differ per box, and both live on the writable partition that survives
+Everything above (OS + app) is immutable and **identical fleet-wide**. Only a few
+small things differ per box, and they live on the writable partition that survives
 OS upgrades:
 - **`config.json`** — that box's camera + microcontroller USB IDs, plus the shared
   `mocroscope` profile. Pushed from the gateway (as `push-config.sh` does today) and
   mounted into the container.
+- **backbone identity** (hostname + IP) — set once at the keyboard (`box-postinstall`),
+  then owned by the gateway inventory (`config/microscopes.json`): add/remove/renumber
+  from the gateway or dashboard, with the IP re-applied to the box over SSH
+  (`set-box-ip.sh`).
 - **acquired image data** — on a writable data path.
 
 ## Break-glass guarantee

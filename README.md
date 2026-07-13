@@ -72,10 +72,13 @@ its real profile (placeholder USB IDs) **plus** the `mocroscope` object from
    no per-package setup. SSH trust, registry trust, USB rules, the seafront service, and
    the kiosk autostart are all baked in; `pharmbio` is created by the installer.
 2. First boot, **at the keyboard**, set identity + backbone IP (the switch has no DHCP,
-   so the box is invisible on the wire until this runs):
+   so the box is invisible on the wire until this runs). Use the name + IP from the
+   gateway inventory (`config/microscopes.json`) — they must match:
    ```bash
-   sudo box-postinstall <n>      # n = 1..4  ->  hostname squid<n>, IP 192.168.50.1<n>
+   sudo box-postinstall <name> <ip>     # e.g.  squid3 192.168.50.13   (/24 assumed)
    ```
+   This is the only bootstrap step the gateway cannot do for you; afterwards the IP is
+   the gateway's to change (`set-box-ip.sh` / dashboard).
 3. Back on the gateway, push the box's config:
    ```bash
    bash scripts/push-config.sh squid<n>
@@ -100,21 +103,55 @@ seafront** (`podman pull`) actions, so you can roll one route without touching t
 
 Caddy on the gateway reverse-proxies `gateway:800<n>` → `squid<n>:8000`; the dashboard
 (`http://<gateway>:8000`) shows per-box health, the OS + seafront image version each box runs
-vs the latest in the registry, per-box **Update OS** / **Update seafront** buttons, and
-links + logs. Edit `config/microscopes.json` then `bash scripts/apply-config.sh` to change
-the mapping.
+vs the latest in the registry, per-box **Update OS** / **Update seafront** buttons, links +
+logs, and — see §5 — **Add microscope** / per-box **Change IP** / **Remove**, plus the gateway
+**Wi-Fi Hotspot/Client** toggle.
 This is *only* convenience — the boxes are fully operable locally with it all down.
+
+## 5 · Changing the fleet — add / remove / renumber / Wi-Fi
+
+The inventory `config/microscopes.json` is the single source of truth (schema in
+`scripts/fleet_config.py`). Change it from the gateway CLI or the dashboard; both edit
+the inventory, re-point Caddy + the firewall, and hot-reload the dashboard (no restart).
+
+```bash
+scripts/add-scope.sh   <name> <ip> [proxy_port]   # register a new box (auto proxy port)
+scripts/remove-scope.sh <name> [--purge-config]   # de-register (does not touch the box)
+scripts/set-box-ip.sh  <name> <new-ip>            # renumber a running box over SSH
+```
+
+`set-box-ip.sh` resolves an IP conflict without stranding the box: it adds the new
+address alongside the old, verifies the box answers on it, then drops the old — and
+auto-reverts if the new address never comes up. (Needs a box on a current OS image; the
+nmcli fleet-sudoers rule ships with it. Older boxes: renumber at the keyboard with
+`box-postinstall`.) IP conflicts on the wider network are yours to spot — the gateway
+just applies the address you give it.
+
+**Wi-Fi (single radio, mutually exclusive modes):**
+```bash
+scripts/wifi-mode.sh ap                     # hotspot laptops join (SSID from config); no internet
+scripts/wifi-mode.sh client [ssid] [pass]   # join an external Wi-Fi for internet
+scripts/wifi-mode.sh status
+```
+AP is the day-to-day mode; flip to **client** only to rebuild/pull images (that needs
+internet), then back. The switch runs detached and auto-reverts on failure, so toggling
+*over the Wi-Fi you are tearing down* cannot strand the gateway — the wired backbone
+(`192.168.50.1` / `squidway.local`) is always the way back in. The chosen mode persists
+across reboots (NetworkManager autoconnect). The dashboard's **rebuild** button is
+disabled while in AP mode (no internet).
 
 ## Layout
 
 ```
 config/microscopes.json   fleet inventory (source of truth)
+scripts/fleet_config.py   inventory schema: load / validate / write / query (used by scripts + dashboard)
 configs/<box>/config.json per-box seafront config (pushed; gitignored)
 configs/mocroscope.profile.json  shared mock profile to merge into each box config
 images/seafront/          app image Containerfile
 images/kinoite/           box OS image Containerfile + baked files/ tree
 images/gateway/           gateway service quadlets (registry, Caddy)
-scripts/                  gateway-setup, build-images, build-installer, push-config, apply-config, set-static-ip, start/stop/status
+scripts/                  gateway-setup, build-images, build-installer, push-config, apply-config,
+                          add-scope, remove-scope, set-box-ip, wifi-mode, set-static-ip, start/stop/status
 dashboard/  Caddyfile      remote-access layer (dashboard = uv host service; Caddy = quadlet)
 docs/immutable-fleet.md   architecture
 ```
