@@ -29,8 +29,13 @@ PodmanArgs=--device-cgroup-rule='c 189:* rmw' --device-cgroup-rule='c 166:* rmw'
 # SELinux is enforcing on Kinoite: raw USB/serial from a container is denied unless
 # either `setsebool -P container_use_devices on` on the box OR (blunter) add:
 #SecurityLabelDisable=true
-# If the Teensy enumerates as /dev/ttyACM*, also expose it (adjust to the real node):
-#AddDevice=/dev/ttyACM0
+# The Teensy microcontroller is a USB CDC-ACM serial device; seafront finds/controls it
+# via pyserial, which needs the /dev/ttyACM* NODE inside the container (the /dev/bus/usb
+# mount above only gives raw libusb access, not the serial node). Pass it through. The
+# leading '-' makes each optional, so a box with no Teensy — e.g. running the mock profile
+# — still starts. The cgroup rule above already grants access to char-major-166 (ttyACM).
+AddDevice=-/dev/ttyACM0
+AddDevice=-/dev/ttyACM1
 
 [Service]
 Restart=always
