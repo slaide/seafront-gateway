@@ -1,17 +1,24 @@
 {
-  "_comment": "Single source of truth for the gateway. Edit this, then run scripts/apply-config.sh (or redeploy). Dedicated gateway 'squidway' (192.168.50.1): it is a plain Wi-Fi CLIENT on an external hotspot (internet), NOT running its own AP — so hotspot-up.sh is not used and the hotspot block below is unused (kept only so status.sh can read wifi_iface). Each microscope is reached by its real backbone IP over the wired switch.",
+  "_comment": "Single source of truth for the gateway. Prefer the scripts (add-scope.sh / remove-scope.sh / set-box-ip.sh) or the dashboard over hand-editing; if you do edit by hand, run scripts/apply-config.sh afterwards. Schema is documented in scripts/fleet_config.py. gateway.backbone describes the isolated wired switch (no DHCP); microscope 'host' IPs must fall inside backbone.subnet. gateway.wifi.mode is the desired single-radio Wi-Fi mode: 'ap' = run a hotspot laptops connect to (no internet), 'client' = join an external Wi-Fi for internet (needed for image rebuilds).",
   "gateway": {
     "dashboard_port": 8000,
-    "hotspot": {
-      "ssid": "microscopes",
-      "password": "microscope-lan",
-      "wifi_iface": "wlp3s0"
+    "backbone": {
+      "subnet": "192.168.50.0/24",
+      "gateway_ip": "192.168.50.1"
+    },
+    "wifi": {
+      "iface": "wlp3s0",
+      "mode": "ap",
+      "hotspot": {
+        "ssid": "microscopes",
+        "password": "microscope-lan"
+      }
     }
   },
   "microscopes": [
-    { "name": "squid1", "host": "192.168.50.11", "seafront_port": 8000, "proxy_port": 8001 },
-    { "name": "squid2", "host": "192.168.50.12", "seafront_port": 8000, "proxy_port": 8002 },
-    { "name": "squid3", "host": "192.168.50.13", "seafront_port": 8000, "proxy_port": 8003 },
-    { "name": "squid4", "host": "192.168.50.14", "seafront_port": 8000, "proxy_port": 8004 }
+    { "name": "squid1", "type": "squid", "host": "192.168.50.11", "seafront_port": 8000, "proxy_port": 8001 },
+    { "name": "squid2", "type": "squid", "host": "192.168.50.12", "seafront_port": 8000, "proxy_port": 8002 },
+    { "name": "squid3", "type": "squid", "host": "192.168.50.13", "seafront_port": 8000, "proxy_port": 8003 },
+    { "name": "squid4", "type": "squid", "host": "192.168.50.14", "seafront_port": 8000, "proxy_port": 8004 }
   ]
 }
