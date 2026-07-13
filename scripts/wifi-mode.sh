@@ -96,24 +96,36 @@ apply_ap() {
 apply_client() {
   local ifc ss pw; ifc="$(iface)"; ss="${1:-}"; pw="${2:-}"
   echo "==> switching $ifc to client mode (station)"
-  # A radio beaconing as an AP cannot scan for or associate with other networks, so fully
-  # drop the hotspot and disconnect the device before we scan/join — otherwise the join
-  # fails with "No network with SSID found".
+  # A radio beaconing as an AP can't scan/associate; fully drop the hotspot first.
   nmcli con modify "$HOTSPOT_CON" connection.autoconnect no 2>/dev/null || true
   nmcli device disconnect "$ifc" 2>/dev/null || true
   # Re-enable autoconnect on saved client profiles (the hotspot outranks them by priority,
   # so this is safe) so a no-SSID switch can rejoin a known network and reboots reconnect.
   nmcli -t -f NAME,TYPE con show | awk -F: '$2=="802-11-wireless"{print $1}' \
     | while read -r c; do [ "$c" = "$HOTSPOT_CON" ] || nmcli con modify "$c" connection.autoconnect yes 2>/dev/null || true; done
-  nmcli device wifi rescan ifname "$ifc" 2>/dev/null || true
-  sleep 3
-  if [ -n "$ss" ]; then
-    # Join the named network (reuses a saved secret if $pw is empty and one exists).
-    nmcli --wait 25 device wifi connect "$ss" ${pw:+password "$pw"} ifname "$ifc"
-  else
-    # No SSID: let NM bring up the best known in-range network on this radio.
-    nmcli --wait 25 device connect "$ifc"
+
+  if [ -z "$ss" ]; then
+    # No SSID: rescan, then let NM bring up the best known in-range network on this radio.
+    nmcli device wifi rescan ifname "$ifc" 2>/dev/null || true
+    sleep 5
+    nmcli --wait 30 device connect "$ifc"
+    return
   fi
+
+  # Explicit SSID: drive it through a connection PROFILE + `con up`. `con up` scans and
+  # associates as part of activation, so — unlike `device wifi connect` — it does NOT need
+  # the SSID to already be in the scan list, which is exactly what fails right after the
+  # radio leaves AP mode. Reuse a saved profile (matched by name == SSID, how NM names
+  # them) or create one; only set a PSK when a password was supplied.
+  if nmcli -t -f NAME,TYPE con show | awk -F: '$2=="802-11-wireless"{print $1}' | grep -Fxq "$ss"; then
+    [ -n "$pw" ] && nmcli con modify "$ss" wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$pw"
+  elif [ -n "$pw" ]; then
+    nmcli con add type wifi ifname "$ifc" con-name "$ss" ssid "$ss" \
+      wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$pw"
+  else
+    nmcli con add type wifi ifname "$ifc" con-name "$ss" ssid "$ss"
+  fi
+  nmcli --wait 30 con up "$ss"
 }
 
 verify_mode() {
