@@ -71,6 +71,21 @@ do_status() {
 }
 
 # --- the actual switches (root) -----------------------------------------------
+# Make exactly one wifi profile ($1) the autoconnect winner and turn autoconnect OFF on
+# every other wifi profile. This keeps the radio's boot/fallback network unambiguous and
+# stops one mode from silently reclaiming the radio from the other (an AP left with
+# autoconnect=yes hijacks client mode; a stray saved network steals the radio from the AP).
+_set_exclusive_autoconnect() {
+  local winner="$1" c
+  nmcli -t -f NAME,TYPE con show | awk -F: '$2=="802-11-wireless"{print $1}' | while read -r c; do
+    if [ "$c" = "$winner" ]; then
+      nmcli con modify "$c" connection.autoconnect yes 2>/dev/null || true
+    else
+      nmcli con modify "$c" connection.autoconnect no 2>/dev/null || true
+    fi
+  done
+}
+
 apply_ap() {
   local ifc ss pw; ifc="$(iface)"; ss="$(ssid)"; pw="$(psk)"
   echo "==> bringing up hotspot '$ss' on $ifc (shared IPv4, no upstream needed)"
@@ -87,28 +102,31 @@ apply_ap() {
     wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$pw" \
     connection.zone trusted \
     connection.autoconnect yes connection.autoconnect-priority 100
-  # The high autoconnect-priority (100) makes the hotspot win at boot over saved client
-  # profiles (default priority 0) WITHOUT disabling theirs — so a later switch to client,
-  # and reboots after it, can still rejoin a known network.
+  # AP is the sole autoconnect winner while in AP mode; a later `client` switch re-enables
+  # the network it joins. This is what stops the AP from hijacking client mode later.
+  _set_exclusive_autoconnect "$HOTSPOT_CON"
   nmcli con up "$HOTSPOT_CON"
 }
 
 apply_client() {
-  local ifc ss pw; ifc="$(iface)"; ss="${1:-}"; pw="${2:-}"
+  local ifc ss pw active; ifc="$(iface)"; ss="${1:-}"; pw="${2:-}"
   echo "==> switching $ifc to client mode (station)"
-  # A radio beaconing as an AP can't scan/associate; fully drop the hotspot first.
+  # A radio beaconing as an AP can't scan/associate; drop the hotspot and stop it
+  # auto-reclaiming the radio (the hijack we hit).
   nmcli con modify "$HOTSPOT_CON" connection.autoconnect no 2>/dev/null || true
   nmcli device disconnect "$ifc" 2>/dev/null || true
-  # Re-enable autoconnect on saved client profiles (the hotspot outranks them by priority,
-  # so this is safe) so a no-SSID switch can rejoin a known network and reboots reconnect.
-  nmcli -t -f NAME,TYPE con show | awk -F: '$2=="802-11-wireless"{print $1}' \
-    | while read -r c; do [ "$c" = "$HOTSPOT_CON" ] || nmcli con modify "$c" connection.autoconnect yes 2>/dev/null || true; done
 
   if [ -z "$ss" ]; then
-    # No SSID: rescan, then let NM bring up the best known in-range network on this radio.
+    # No SSID: reconnect the best KNOWN in-range network. Temporarily allow all saved
+    # client profiles as candidates so NM can pick one, then pin whatever came up as the
+    # SOLE autoconnect — so only it (not the AP, not some other saved net) is the fallback.
+    nmcli -t -f NAME,TYPE con show | awk -F: '$2=="802-11-wireless"{print $1}' \
+      | while read -r c; do [ "$c" = "$HOTSPOT_CON" ] || nmcli con modify "$c" connection.autoconnect yes 2>/dev/null || true; done
     nmcli device wifi rescan ifname "$ifc" 2>/dev/null || true
     sleep 5
-    nmcli --wait 30 device connect "$ifc"
+    nmcli --wait 30 device connect "$ifc" || true
+    active="$(active_wifi_con)"
+    [ -n "$active" ] && _set_exclusive_autoconnect "$active"
     return
   fi
 
@@ -125,6 +143,9 @@ apply_client() {
   else
     nmcli con add type wifi ifname "$ifc" con-name "$ss" ssid "$ss"
   fi
+  # Only the joined network auto-rejoins; the hotspot and every other saved profile are
+  # turned off, so the last explicit mode is exactly what the radio does next / at boot.
+  _set_exclusive_autoconnect "$ss"
   nmcli --wait 30 con up "$ss"
 }
 
