@@ -87,31 +87,43 @@ apply_ap() {
     wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$pw" \
     connection.zone trusted \
     connection.autoconnect yes connection.autoconnect-priority 100
-  # Demote every other wifi profile so it doesn't grab the radio at boot.
-  nmcli -t -f NAME,TYPE con show | awk -F: '$2=="802-11-wireless"{print $1}' \
-    | while read -r c; do [ "$c" = "$HOTSPOT_CON" ] || nmcli con modify "$c" connection.autoconnect no; done
+  # The high autoconnect-priority (100) makes the hotspot win at boot over saved client
+  # profiles (default priority 0) WITHOUT disabling theirs — so a later switch to client,
+  # and reboots after it, can still rejoin a known network.
   nmcli con up "$HOTSPOT_CON"
 }
 
 apply_client() {
   local ifc ss pw; ifc="$(iface)"; ss="${1:-}"; pw="${2:-}"
   echo "==> switching $ifc to client mode (station)"
+  # A radio beaconing as an AP cannot scan for or associate with other networks, so fully
+  # drop the hotspot and disconnect the device before we scan/join — otherwise the join
+  # fails with "No network with SSID found".
   nmcli con modify "$HOTSPOT_CON" connection.autoconnect no 2>/dev/null || true
-  nmcli con down "$HOTSPOT_CON" 2>/dev/null || true
+  nmcli device disconnect "$ifc" 2>/dev/null || true
+  # Re-enable autoconnect on saved client profiles (the hotspot outranks them by priority,
+  # so this is safe) so a no-SSID switch can rejoin a known network and reboots reconnect.
+  nmcli -t -f NAME,TYPE con show | awk -F: '$2=="802-11-wireless"{print $1}' \
+    | while read -r c; do [ "$c" = "$HOTSPOT_CON" ] || nmcli con modify "$c" connection.autoconnect yes 2>/dev/null || true; done
+  nmcli device wifi rescan ifname "$ifc" 2>/dev/null || true
+  sleep 3
   if [ -n "$ss" ]; then
-    # Creates (or reuses) a saved profile, autoconnect yes by default.
-    nmcli device wifi connect "$ss" ${pw:+password "$pw"} ifname "$ifc"
+    # Join the named network (reuses a saved secret if $pw is empty and one exists).
+    nmcli --wait 25 device wifi connect "$ss" ${pw:+password "$pw"} ifname "$ifc"
   else
-    # No SSID given: activate the best known/autoconnect network on the radio.
-    nmcli device connect "$ifc"
+    # No SSID: let NM bring up the best known in-range network on this radio.
+    nmcli --wait 25 device connect "$ifc"
   fi
 }
 
 verify_mode() {
   case "$1" in
     ap)     [ "$(current_mode)" = ap ] ;;
-    client) local c; c="$(nmcli -t -f CONNECTIVITY general status 2>/dev/null || true)"
-            [ "$c" = full ] || [ "$c" = portal ] || [ "$c" = limited ] ;;
+    client) # "full" = real internet; "portal" = associated behind a captive portal. NOT
+            # "limited"/"none" — those mean connected to something with no upstream, which
+            # is exactly the failure we are guarding against (client mode exists for internet).
+            local c; c="$(nmcli -t -f CONNECTIVITY general status 2>/dev/null || true)"
+            [ "$c" = full ] || [ "$c" = portal ] ;;
   esac
 }
 
@@ -120,14 +132,16 @@ do_apply() {
   local target="$1" ss="${2:-}" pw="${3:-}" prev
   prev="$(current_mode)"
   echo "==> switching Wi-Fi: $prev -> $target"
-  if [ "$target" = ap ]; then apply_ap; else apply_client "$ss" "$pw"; fi
+  # `|| true`: a failed switch (e.g. bad password, network out of range) must NOT abort the
+  # worker under `set -e` — it has to fall through to verify + revert so we never strand it.
+  if [ "$target" = ap ]; then apply_ap || true; else apply_client "$ss" "$pw" || true; fi
   echo "==> waiting ${VERIFY_WAIT}s for $target to settle…"
   sleep "$VERIFY_WAIT"
   if verify_mode "$target"; then
     echo "==> Wi-Fi is now in $target mode"
   else
     echo "!! $target did not come up; reverting to $prev" >&2
-    if [ "$prev" = ap ]; then apply_ap; else apply_client; fi
+    if [ "$prev" = ap ]; then apply_ap || true; else apply_client || true; fi
   fi
 }
 
