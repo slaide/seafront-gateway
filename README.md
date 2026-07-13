@@ -92,6 +92,7 @@ its real profile (placeholder USB IDs) **plus** the `mocroscope` object from
 |---|---|
 | **App** (seafront) | bump `SEAFRONT_REF` in `build-images.sh` → `build-images.sh --seafront` → per box `sudo systemctl restart seafront` (quadlet `ExecStartPre` re-pulls `:stable`) |
 | **OS** (Kinoite) | `build-images.sh --os`, then per box: `sudo bootc upgrade` + reboot (staged in the spare slot, auto-rollback on bad boot) |
+| **Fedora base** (rare) | `scripts/bump-os-base.sh [tag]` re-pins the base digest → commit → `build-images.sh --os`. The base is **digest-pinned**, so ordinary OS rebuilds reuse the cached base instead of re-downloading the multi-GB image; you only pull a new base when you deliberately bump. |
 | **Config** | edit `configs/squid<n>/config.json` → `push-config.sh squid<n>` |
 
 A running acquisition is never disturbed — update the idle boxes, flush the busy one later.
@@ -150,8 +151,8 @@ configs/mocroscope.profile.json  shared mock profile to merge into each box conf
 images/seafront/          app image Containerfile
 images/kinoite/           box OS image Containerfile + baked files/ tree
 images/gateway/           gateway service quadlets (registry, Caddy)
-scripts/                  gateway-setup, build-images, build-installer, push-config, apply-config,
-                          add-scope, remove-scope, set-box-ip, wifi-mode, set-static-ip, start/stop/status
+scripts/                  gateway-setup, build-images, bump-os-base, build-installer, push-config,
+                          apply-config, add-scope, remove-scope, set-box-ip, wifi-mode, set-static-ip, start/stop/status
 dashboard/  Caddyfile      remote-access layer (dashboard = uv host service; Caddy = quadlet)
 docs/immutable-fleet.md   architecture
 ```

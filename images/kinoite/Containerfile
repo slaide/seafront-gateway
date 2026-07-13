@@ -13,11 +13,14 @@
 #   - a Firefox kiosk autostart to localhost:8000 (the break-glass operator console)
 #   - box-postinstall on PATH (sets per-box identity + backbone IP at first boot)
 #
-# NOTE: the base tag tracks a Fedora release; bump it deliberately when you want a
-# newer Fedora. fedora-ostree-desktops publishes Kinoite as an OCI/ostree image that
-# bootc can consume directly.
-ARG FEDORA_VERSION=44
-FROM quay.io/fedora-ostree-desktops/kinoite:${FEDORA_VERSION}
+# The base is pinned by DIGEST, not just the moving :44 tag. fedora-ostree-desktops
+# republishes :44 constantly (package updates land on the same tag); with `podman build
+# --pull` a moved tag re-downloads the whole multi-GB base and invalidates every layer
+# below FROM — painfully slow over the gateway's occasional/weak uplink. Pinning the digest
+# makes rebuilds reuse the locally-cached base and stay reproducible. Bump DELIBERATELY:
+# `scripts/bump-os-base.sh [tag]` re-pins to the current digest (or a new Fedora tag);
+# commit it, then `build-images.sh --os` pulls the new base once.
+FROM quay.io/fedora-ostree-desktops/kinoite:44@sha256:b46719aad9beb6da5126a264c4ee2fd853ac74250420a473c22d89bec37432b2
 
 # --- host packages (kept minimal; the camera SDKs live in the APP image, not here) ---
 # podman is present on Kinoite; add nothing unless required. Layer extras here if a
