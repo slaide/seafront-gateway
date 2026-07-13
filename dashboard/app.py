@@ -313,10 +313,19 @@ async def restart_service(name: str) -> JSONResponse:
 
 @app.post("/api/scope/{name}/reboot")
 async def reboot(name: str) -> JSONResponse:
-    # `systemctl reboot` tears down the connection as it succeeds; ssh returns
-    # non-zero on that dropped channel, so treat a connection drop as success.
-    rc, out, err = await _ssh(name, ["sudo", SYSTEMCTL, "reboot"], timeout=10.0)
-    return JSONResponse({"ok": True, "action": "reboot", "note": (err or out).strip()})
+    # Use /usr/sbin/reboot, NOT `systemctl reboot`: the box fleet sudoers grants
+    # /usr/sbin/reboot passwordless, while `systemctl reboot` matches only the
+    # password-required %wheel rule — so over our tty-less SSH `sudo systemctl reboot`
+    # silently fails and the box never reboots (a staged bootc OS is never applied).
+    # A real reboot tears down the SSH channel (nonzero rc, connection-drop message) =
+    # success; a sudo/permission refusal returns fast with a recognizable error — surface
+    # that as a failure instead of a false "ok".
+    rc, out, err = await _ssh(name, ["sudo", "-n", "/usr/sbin/reboot"], timeout=10.0)
+    msg = (err or out).strip()
+    if rc != 0 and any(s in msg for s in
+                       ("sudo:", "a password is required", "a terminal is required", "not allowed")):
+        raise HTTPException(502, f"reboot not permitted: {msg}")
+    return JSONResponse({"ok": True, "action": "reboot", "note": msg})
 
 
 @app.get("/api/scope/{name}/config", response_class=PlainTextResponse)
