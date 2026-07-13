@@ -1,6 +1,8 @@
 # Narrow, passwordless rule so the gateway (SSHing in as pharmbio with the fleet key)
 # can drive this box — and nothing else. Covers the dashboard's image reads, both
-# update routes (OS via bootc, app via podman), app restart, and reboot.
+# update routes (OS via bootc, app via podman), app restart, reboot, and central
+# renumbering (nmcli — broad on purpose: the gateway already has full control of the
+# box over this trusted backbone, so scoping nmcli further buys nothing).
 #
 # IMPORTANT sudoers gotcha: a literal `:` in a command spec is parsed as a
 # host/command-spec separator and INVALIDATES the whole file (sudo then ignores
@@ -20,4 +22,7 @@ pharmbio ALL=(root) NOPASSWD: \
     /usr/bin/bootc switch *, \
     /usr/bin/podman image inspect 192.168.50.1*, \
     /usr/bin/podman pull 192.168.50.1*, \
+    /usr/bin/nmcli connection modify *, \
+    /usr/bin/nmcli connection up *, \
+    /usr/bin/nmcli device reapply *, \
     /usr/sbin/reboot
