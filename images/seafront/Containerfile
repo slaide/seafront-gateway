@@ -9,9 +9,11 @@
 # which is why this must build where there's internet.
 FROM python:3.13-slim-bookworm
 
-# runtime libs: opencv needs libGL+glib; cameras/Teensy need libusb; git for the VCS deps.
+# runtime libs: opencv needs libGL+glib; cameras/Teensy need libusb; git for the VCS deps;
+# usbutils gives `lsusb`, which seafront's Galaxy enumeration + list_squid_hardware.py shell
+# out to for the raw USB VID:PID lookup (without it, camera discovery finds nothing).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        git libgl1 libglib2.0-0 libusb-1.0-0 \
+        git libgl1 libglib2.0-0 libusb-1.0-0 usbutils \
     && rm -rf /var/lib/apt/lists/*
 
 # uv, pinned by digest-free tag (build host has internet)
@@ -29,6 +31,29 @@ WORKDIR /app
 # lowered concurrency make the (network-heavy) build robust on the gateway's link.
 RUN --mount=type=cache,target=/root/.cache/uv \
     UV_CONCURRENT_DOWNLOADS=4 UV_HTTP_TIMEOUT=120 uv sync --frozen --no-dev
+
+# Daheng Galaxy camera SDK (native). gxipy — installed above by uv — loads
+# /usr/lib/libgxiapi.so via ctypes but does NOT ship the SDK, so without it camera discovery
+# fails with "Cannot find libgxiapi.so". The wrapper fork ships the SDK as a self-extracting
+# install.run (a base64-embedded tarball); the unpacked Galaxy_camera/ tree is GITIGNORED, so
+# we extract the tarball from install.run rather than reading files that aren't in the repo.
+# We take only the RUNTIME bits — libgxiapi.so + the GenTL transport producers (.cti) it
+# dlopens to enumerate cameras (GxU3VTL = USB3 Vision, our MER2-*U3M; GxGVTL = GigE) — and
+# point libgxiapi at them via GENICAM_GENTL64_PATH. We deliberately do NOT *run* install.run:
+# it is interactive and does host-side setup (udev rules, usbfs via /sys) that belongs in the
+# OS image, not a container build (the usbfs karg + udev perms are in the Kinoite image).
+ARG GXIPY_REPO=https://github.com/slaide/daheng-imaging-gxipy.git
+RUN git clone --depth 1 "$GXIPY_REPO" /tmp/gx \
+    && cd /tmp/gx/install_sdk/linux-x86 \
+    && A=$(awk '/^__ARCHIVE_FOLLOWS__/{print NR+1; exit}' install.run) \
+    && tail -n +"$A" install.run | base64 --decode | tar xz \
+    && SDK=Galaxy_camera/lib/x86_64 \
+    && install -Dm755 "$SDK/libgxiapi.so" /usr/lib/libgxiapi.so \
+    && install -Dm755 "$SDK/GxU3VTL.cti"  /usr/lib/GxU3VTL.cti \
+    && install -Dm755 "$SDK/GxGVTL.cti"   /usr/lib/GxGVTL.cti \
+    && ldconfig \
+    && rm -rf /tmp/gx
+ENV GENICAM_GENTL64_PATH=/usr/lib
 
 # Config + acquired images live on a host volume mounted here (see the quadlet).
 # So the container is stateless; config.json is pushed to the box, not baked.
