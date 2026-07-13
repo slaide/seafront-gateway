@@ -706,6 +706,22 @@ HTML = """<!doctype html>
   #toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
            background: #161b22; border: 1px solid #30363d; border-radius: 8px;
            padding: 10px 16px; font-size: .85rem; display: none; }
+  #addmodal { position: fixed; inset: 0; background: #000a; display: none; z-index: 10;
+              padding: 32px; align-items: center; justify-content: center; }
+  #addmodal.show { display: flex; }
+  #addbox { background: #0d1117; border: 1px solid #30363d; border-radius: 12px;
+            width: 100%; max-width: 420px; }
+  #addhead { display: flex; justify-content: space-between; align-items: center;
+             padding: 14px 18px; border-bottom: 1px solid #30363d; }
+  .addform { padding: 16px 18px; display: flex; flex-direction: column; gap: 12px; }
+  .addform label { display: flex; flex-direction: column; gap: 4px;
+                   font-size: .78rem; color: #8b949e; }
+  .addform input { font: inherit; font-size: .9rem; padding: 8px 10px; border-radius: 8px;
+                   border: 1px solid #30363d; background: #0e1116; color: #e6edf3; }
+  .addform input:focus { outline: none; border-color: #58a6ff; }
+  .adderr { color: #f85149; font-size: .8rem; min-height: 1.1em; }
+  .addbtns { display: flex; justify-content: flex-end; gap: 8px; margin-top: 2px; }
+  button.primary { background: #238636; border-color: #238636; color: #fff; }
 </style>
 </head>
 <body>
@@ -741,6 +757,25 @@ HTML = """<!doctype html>
   <pre id="modalbody"></pre>
 </div></div>
 <div id="toast"></div>
+
+<div id="addmodal" onclick="if(event.target===this)closeAdd()">
+  <div id="addbox">
+    <div id="addhead"><strong>Add microscope</strong>
+      <button onclick="closeAdd()">close</button></div>
+    <div class="addform" onkeydown="if(event.key==='Enter')submitAdd(); if(event.key==='Escape')closeAdd();">
+      <label>Name<input id="f-name" placeholder="e.g. squid5" autocomplete="off"></label>
+      <label>Backbone IP<input id="f-host" placeholder="e.g. 192.168.50.15 (inside backbone subnet)" autocomplete="off"></label>
+      <label>Proxy port<input id="f-pp" placeholder="blank = auto-assign next free" autocomplete="off"></label>
+      <label>Type<input id="f-type" value="squid" autocomplete="off"></label>
+      <label>seafront port<input id="f-sp" value="8000" autocomplete="off"></label>
+      <div class="adderr" id="adderr"></div>
+      <div class="addbtns">
+        <button onclick="closeAdd()">Cancel</button>
+        <button id="addsubmit" class="primary" onclick="submitAdd()">Add</button>
+      </div>
+    </div>
+  </div>
+</div>
 
 <script>
 function toast(msg) {
@@ -895,21 +930,42 @@ async function setWifi(mode) {
   } catch (e) { toast('Wi-Fi request sent; link may have dropped — reconnect and check status'); }
   setTimeout(fetchWifi, 8000);
 }
-async function addScope() {
-  const name = prompt('New microscope name (e.g. squid5):');
-  if (!name) return;
-  const host = prompt('Backbone IP (inside the backbone subnet, e.g. 192.168.50.15):');
-  if (!host) return;
-  const pp = prompt('Proxy port (blank = auto-assign next free):', '');
-  const body = { name: name.trim(), host: host.trim() };
-  if (pp && pp.trim()) body.proxy_port = parseInt(pp.trim(), 10);
-  toast('adding ' + name + '…');
+function addScope() {
+  const v = (id, val) => document.getElementById(id).value = val;
+  v('f-name', ''); v('f-host', ''); v('f-pp', ''); v('f-type', 'squid'); v('f-sp', '8000');
+  document.getElementById('adderr').textContent = '';
+  document.getElementById('addsubmit').disabled = false;
+  document.getElementById('addmodal').classList.add('show');
+  document.getElementById('f-name').focus();
+}
+function closeAdd() { document.getElementById('addmodal').classList.remove('show'); }
+async function submitAdd() {
+  const val = id => document.getElementById(id).value.trim();
+  const err = document.getElementById('adderr');
+  const name = val('f-name'), host = val('f-host'), pp = val('f-pp');
+  const type = val('f-type') || 'squid', sp = val('f-sp');
+  if (!name || !host) { err.textContent = 'Name and backbone IP are required.'; return; }
+  const body = { name, host, type };
+  if (pp) body.proxy_port = parseInt(pp, 10);
+  if (sp) body.seafront_port = parseInt(sp, 10);
+  const btn = document.getElementById('addsubmit');
+  btn.disabled = true; err.textContent = 'adding…';
   try {
     const r = await fetch('/api/fleet/scope', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
     const j = await r.json().catch(() => ({}));
-    toast(r.ok ? ('added ' + name + ' → proxy :' + (j.scope && j.scope.proxy_port)) : ('add failed — ' + (j.detail || r.status)));
-  } catch (e) { toast('add failed — ' + e); }
-  setTimeout(() => { refresh(); fetchImages(); }, 1000);
+    if (r.ok) {
+      closeAdd();
+      toast('added ' + name + ' → proxy :' + (j.scope && j.scope.proxy_port));
+      setTimeout(() => { refresh(); fetchImages(); }, 800);
+    } else {
+      // Keep the dialog open with the entered values so the error can be fixed in place.
+      err.textContent = j.detail || ('failed (HTTP ' + r.status + ')');
+      btn.disabled = false;
+    }
+  } catch (e) {
+    err.textContent = 'request failed: ' + e;
+    btn.disabled = false;
+  }
 }
 async function removeScope(name) {
   if (!confirm('Remove ' + name + ' from the fleet?\\n\\nDe-registers it from the proxy + dashboard. Does not touch the box itself.')) return;
