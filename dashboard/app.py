@@ -32,6 +32,7 @@ import ipaddress
 import json
 import os
 import pathlib
+import shlex
 import sys
 
 import httpx
@@ -249,12 +250,26 @@ def _parse_app(text: str) -> dict:
     return {"present": True, "digest": d.get("Digest"), "created": d.get("Created")}
 
 
-# One SSH round-trip per box: OS image (bootc) + app image present (podman). Both
-# need root; the fleet sudoers rule grants exactly these two reads passwordless.
+# List the profile names in the box's config.json (no sudo — pharmbio owns it). Single
+# argv element / single-quoted python so ssh's space-join + remote re-parse keep it intact.
+_LIST_PROFILES_CMD = (
+    "python3 -c 'import json,os;"
+    "print(chr(10).join(m.get(\"system.microscope_name\",\"\") "
+    "for m in json.load(open(os.path.expanduser(\"~/seafront/config.json\"))).get(\"microscopes\",[])))'"
+    " 2>/dev/null"
+)
+
+# One SSH round-trip per box: OS image (bootc) + app image (podman) + the seafront profiles
+# in config.json + the active-profile override. bootc/podman need root (fleet sudoers grants
+# exactly those reads); the config reads run as pharmbio.
 _BOX_IMAGES_CMD = (
     "sudo -n /usr/bin/bootc status --format=json 2>/dev/null"
     "; echo '<<<SPLIT>>>'; "
     f"sudo -n /usr/bin/podman image inspect {APP_IMAGE} 2>/dev/null"
+    "; echo '<<<SPLIT>>>'; "
+    f"{_LIST_PROFILES_CMD}"
+    "; echo '<<<SPLIT>>>'; "
+    "cat ~/seafront/active_microscope 2>/dev/null"
 )
 
 
@@ -264,9 +279,16 @@ async def _box_images(name: str) -> dict:
     try:
         _rc, out, _err = await _ssh(name, [_BOX_IMAGES_CMD], timeout=15.0)
     except HTTPException:
-        return {"name": name, "os": {"available": False}, "seafront": {"present": False}}
-    os_part, _, app_part = out.partition("<<<SPLIT>>>")
-    return {"name": name, "os": _parse_bootc(os_part), "seafront": _parse_app(app_part)}
+        return {"name": name, "os": {"available": False}, "seafront": {"present": False},
+                "microscopes": [], "active": None}
+    parts = out.split("<<<SPLIT>>>")
+    os_part = parts[0] if len(parts) > 0 else ""
+    app_part = parts[1] if len(parts) > 1 else ""
+    prof_part = parts[2] if len(parts) > 2 else ""
+    active_part = parts[3] if len(parts) > 3 else ""
+    profiles = [p.strip() for p in prof_part.splitlines() if p.strip()]
+    return {"name": name, "os": _parse_bootc(os_part), "seafront": _parse_app(app_part),
+            "microscopes": profiles, "active": active_part.strip() or None}
 
 
 @app.get("/api/images")
@@ -642,6 +664,31 @@ async def wifi_set_mode(w: WifiIn) -> JSONResponse:
     return JSONResponse({"ok": True, "scheduled": w.mode, "note": out.strip()})
 
 
+# --- microscope profile switch (real vs mock, etc.) ----------------------------
+class MicroscopeIn(BaseModel):
+    profile: str
+
+
+@app.post("/api/scope/{name}/microscope")
+async def set_microscope(name: str, body: MicroscopeIn) -> JSONResponse:
+    """Switch which profile the box's seafront runs: validate the name against the box's
+    config.json, write the per-box override file (~/seafront/active_microscope), and
+    restart seafront. Needs a box on an app image built after override support landed
+    (older images ignore the file)."""
+    scope_or_404(name)
+    prof = body.profile.strip()
+    _rc, out, _err = await _ssh(name, [_LIST_PROFILES_CMD])
+    avail = [p.strip() for p in out.splitlines() if p.strip()]
+    if prof not in avail:
+        raise HTTPException(400, f"profile {prof!r} not in {name} config (have: {', '.join(avail) or 'none'})")
+    cmd = (f"printf '%s\\n' {shlex.quote(prof)} > ~/seafront/active_microscope"
+           " && sudo -n /usr/bin/systemctl restart seafront")
+    rc, out, err = await _ssh(name, [cmd], timeout=120.0)
+    if rc != 0:
+        raise HTTPException(502, f"switch failed: {(err or out).strip()}")
+    return JSONResponse({"ok": True, "profile": prof})
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index() -> str:
     return HTML
@@ -715,19 +762,19 @@ HTML = """<!doctype html>
   #toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
            background: #161b22; border: 1px solid #30363d; border-radius: 8px;
            padding: 10px 16px; font-size: .85rem; display: none; }
-  #addmodal { position: fixed; inset: 0; background: #000a; display: none; z-index: 10;
-              padding: 32px; align-items: center; justify-content: center; }
-  #addmodal.show { display: flex; }
-  #addbox { background: #0d1117; border: 1px solid #30363d; border-radius: 12px;
+  #addmodal, #micmodal { position: fixed; inset: 0; background: #000a; display: none;
+              z-index: 10; padding: 32px; align-items: center; justify-content: center; }
+  #addmodal.show, #micmodal.show { display: flex; }
+  #addbox, #micbox { background: #0d1117; border: 1px solid #30363d; border-radius: 12px;
             width: 100%; max-width: 420px; }
-  #addhead { display: flex; justify-content: space-between; align-items: center;
+  #addhead, #michead { display: flex; justify-content: space-between; align-items: center;
              padding: 14px 18px; border-bottom: 1px solid #30363d; }
   .addform { padding: 16px 18px; display: flex; flex-direction: column; gap: 12px; }
   .addform label { display: flex; flex-direction: column; gap: 4px;
                    font-size: .78rem; color: #8b949e; }
-  .addform input { font: inherit; font-size: .9rem; padding: 8px 10px; border-radius: 8px;
-                   border: 1px solid #30363d; background: #0e1116; color: #e6edf3; }
-  .addform input:focus { outline: none; border-color: #58a6ff; }
+  .addform input, .addform select { font: inherit; font-size: .9rem; padding: 8px 10px;
+                   border-radius: 8px; border: 1px solid #30363d; background: #0e1116; color: #e6edf3; }
+  .addform input:focus, .addform select:focus { outline: none; border-color: #58a6ff; }
   .adderr { color: #f85149; font-size: .8rem; min-height: 1.1em; }
   .addbtns { display: flex; justify-content: flex-end; gap: 8px; margin-top: 2px; }
   button.primary { background: #238636; border-color: #238636; color: #fff; }
@@ -736,7 +783,7 @@ HTML = """<!doctype html>
 <body>
 <header>
   <h1>🔬 Microscope Gateway</h1>
-  <div class="sub">Fleet status &amp; image updates. Auto-refreshing every 5s.</div>
+  <div class="sub">Fleet status &amp; image updates. Auto-refreshing every 1s.</div>
   <div class="gateway">
     <div class="gwrow">
       <span class="gwname">🖥️ <b id="gwhost">gateway</b></span>
@@ -781,6 +828,21 @@ HTML = """<!doctype html>
       <div class="addbtns">
         <button onclick="closeAdd()">Cancel</button>
         <button id="addsubmit" class="primary" onclick="submitAdd()">Add</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="micmodal" onclick="if(event.target===this)closeMic()">
+  <div id="micbox">
+    <div id="michead"><strong id="mictitle">Microscope profile</strong>
+      <button onclick="closeMic()">close</button></div>
+    <div class="addform">
+      <label>Profile (from the box's config.json)<select id="micselect"></select></label>
+      <div class="adderr" id="micerr"></div>
+      <div class="addbtns">
+        <button onclick="closeMic()">Cancel</button>
+        <button id="micsubmit" class="primary" onclick="applyMic()">Apply + restart</button>
       </div>
     </div>
   </div>
@@ -1039,6 +1101,39 @@ function updateApp(name) {
   runJob(name, 'update-seafront', `Update seafront — ${name} → ${short(reg.digest)}`);
 }
 
+function microscopeDialog(name) {
+  const b = IMAGES.boxes[name] || {};
+  const profs = b.microscopes || [];
+  const active = b.active;                     // override-file content, or null
+  const sel = document.getElementById('micselect');
+  sel.innerHTML = '';
+  profs.forEach(p => {
+    const o = document.createElement('option');
+    o.value = p; o.textContent = p + (p === active ? '  (active)' : '');
+    if (p === active) o.selected = true;
+    sel.appendChild(o);
+  });
+  if (!profs.length) { const o = document.createElement('option'); o.textContent = '(no profiles in config.json)'; sel.appendChild(o); }
+  document.getElementById('mictitle').textContent = name + ' — microscope profile';
+  document.getElementById('micerr').textContent = (!active && profs.length) ? 'No override set — box runs the image default until you pick one.' : '';
+  document.getElementById('micsubmit').disabled = !profs.length;
+  const m = document.getElementById('micmodal');
+  m.dataset.box = name; m.classList.add('show');
+}
+function closeMic() { document.getElementById('micmodal').classList.remove('show'); }
+async function applyMic() {
+  const name = document.getElementById('micmodal').dataset.box;
+  const profile = document.getElementById('micselect').value;
+  const err = document.getElementById('micerr'); const btn = document.getElementById('micsubmit');
+  btn.disabled = true; err.textContent = 'switching + restarting seafront…';
+  try {
+    const r = await fetch('/api/scope/' + name + '/microscope', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({profile})});
+    const j = await r.json().catch(() => ({}));
+    if (r.ok) { closeMic(); toast(name + ': profile → ' + profile + ' (restarting)'); setTimeout(() => { refresh(); fetchImages(); }, 1500); }
+    else { err.textContent = j.detail || ('failed (HTTP ' + r.status + ')'); btn.disabled = false; }
+  } catch (e) { err.textContent = 'request failed: ' + e; btn.disabled = false; }
+}
+
 async function refresh() {
   let data;
   try { data = await (await fetch('/api/status')).json(); }
@@ -1072,6 +1167,7 @@ async function refresh() {
         <button class="${appStale ? 'hot' : ''}" onclick="updateApp('${m.name}')">Update seafront</button>
         <button onclick="changeIp('${m.name}')">Change IP</button>
         <button class="danger" onclick="removeScope('${m.name}')">Remove</button>
+        <button style="grid-column:1/3" onclick="microscopeDialog('${m.name}')">🔬 Profile: ${(IMAGES.boxes[m.name]||{}).active || 'default'}</button>
         <button class="danger" style="grid-column:1/3"
           onclick="act('${m.name}','reboot','Reboot ${m.name} (${m.host})? This interrupts anything running on it.')">
           Reboot computer</button>
@@ -1086,7 +1182,7 @@ async function refresh() {
 fetchImages();
 fetchGateway();
 fetchWifi();
-setInterval(refresh, 5000);
+setInterval(refresh, 1000);
 setInterval(fetchImages, 30000);   // image info needs SSH per box — poll gently
 setInterval(fetchGateway, 15000);  // gateway git/rebuild state (local, cheap)
 setInterval(fetchWifi, 15000);     // gateway Wi-Fi mode + internet reachability
