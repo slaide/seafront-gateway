@@ -26,7 +26,18 @@ HOTSPOT_CON="fleet-hotspot"
 SWITCH_UNIT="fleet-wifi-switch"
 VERIFY_WAIT="${WIFI_VERIFY_WAIT:-20}"   # seconds to let the new mode settle before verifying
 
-iface()  { $FC get gateway.wifi.iface; }
+# The Wi-Fi radio. An explicit gateway.wifi.iface in the config wins (for a gateway with
+# more than one radio); otherwise auto-detect the first wireless netdev. Avoids baking in
+# a device name that differs per gateway (e.g. wlp3s0 vs wlp87s0f0).
+iface() {
+  local configured
+  configured="$($FC get gateway.wifi.iface 2>/dev/null || true)"
+  if [ -n "$configured" ]; then echo "$configured"; return; fi
+  local d
+  for d in /sys/class/net/*; do
+    [ -d "$d/wireless" ] && { basename "$d"; return; }
+  done
+}
 ssid()   { $FC get gateway.wifi.hotspot.ssid; }
 psk()    { $FC get gateway.wifi.hotspot.password; }
 

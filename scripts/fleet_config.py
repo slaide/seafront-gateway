@@ -13,7 +13,7 @@ Schema (config/microscopes.json):
         "dashboard_port": 8000,
         "backbone": { "subnet": "192.168.50.0/24", "gateway_ip": "192.168.50.1" },
         "wifi": {
-          "iface": "wlp3s0",
+          "iface": "",                        # "" = auto-detect the radio; set to override
           "mode": "ap",                       # desired mode: "ap" | "client"
           "hotspot": { "ssid": "microscopes", "password": "microscope-lan" }
         }
