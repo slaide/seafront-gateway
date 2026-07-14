@@ -789,6 +789,9 @@ HTML = """<!doctype html>
   button:hover { border-color: #6e7681; }
   button.danger:hover { border-color: #f85149; color: #f85149; }
   button:disabled { opacity: .5; cursor: default; }
+  .jobrun { color: #58a6ff; }
+  .linkbtn { background: none; border: none; padding: 0 2px; color: #58a6ff; font: inherit;
+             font-size: .8rem; text-decoration: underline; cursor: pointer; }
   footer { color: #6e7681; font-size: .8rem; padding: 0 24px 24px; }
   #modal { position: fixed; inset: 0; background: #000a; display: none; padding: 32px;
            align-items: stretch; }
@@ -851,7 +854,7 @@ HTML = """<!doctype html>
 
 <div id="modal"><div id="modalbox">
   <div id="modalhead"><strong id="modaltitle"></strong>
-    <button onclick="document.getElementById('modal').classList.remove('show')">close</button></div>
+    <button onclick="closeModal()">close</button></div>
   <pre id="modalbody"></pre>
 </div></div>
 <div id="toast"></div>
@@ -926,6 +929,7 @@ function appLine(a, reg) {
 }
 
 async function view(name, kind) {
+  MODAL_JOB = null;
   const box = document.getElementById('modalbody');
   document.getElementById('modaltitle').textContent = `${name} — ${kind}`;
   box.textContent = 'loading…';
@@ -947,6 +951,13 @@ async function act(name, action, confirmMsg) {
 }
 
 let IMAGES = {registry: {}, boxes: {}};
+// Per-box background jobs (update-os / update-seafront / set-ip). They run server-side and
+// can take minutes; tracked here so the grid stays fully interactive while they run — no
+// blocking modal, just an inline per-card indicator. MODAL_JOB names the box whose live log
+// the (optional, dismissible) modal is currently showing.
+const BOXJOBS = {};
+let MODAL_JOB = null;
+function closeModal() { MODAL_JOB = null; document.getElementById('modal').classList.remove('show'); }
 async function fetchImages() {
   try {
     const d = await (await fetch('/api/images')).json();
@@ -966,27 +977,63 @@ function openModal(title) {
   document.getElementById('modalbody').textContent = 'starting…';
   document.getElementById('modal').classList.add('show');
 }
-async function runJob(name, action, title) {
-  openModal(title);
-  let r;
-  try { r = await fetch(`/api/scope/${name}/${action}`, {method: 'POST'}); }
-  catch (e) { document.getElementById('modalbody').textContent = 'request failed: ' + e; return; }
-  if (!r.ok) {
-    const j = await r.json().catch(() => ({}));
-    document.getElementById('modalbody').textContent = 'error: ' + (j.detail || r.status);
-    return;
-  }
-  pollJob(name);
-}
-async function pollJob(name) {
-  const box = document.getElementById('modalbody');
+// Fire a long-running per-box job WITHOUT blocking the UI: POST to start, then track it in
+// BOXJOBS and poll in the background. The card shows an inline "⏳ …" with a dismissible
+// "view log"; the grid keeps refreshing and every other control stays usable meanwhile.
+async function startJob(name, action, kind, opts = {}) {
+  if (opts.confirmMsg && !confirm(opts.confirmMsg)) return;
+  if (BOXJOBS[name] && BOXJOBS[name].running) { toast(`${name}: a job is already running (${BOXJOBS[name].kind})`); return; }
+  BOXJOBS[name] = {kind, running: true, rc: null, log: '(starting…)'};
+  refresh();
+  const init = {method: 'POST'};
+  if (opts.body) { init.headers = {'Content-Type': 'application/json'}; init.body = JSON.stringify(opts.body); }
   try {
-    const j = await (await fetch(`/api/scope/${name}/job`)).json();
-    box.textContent = j.log || '(starting…)';
-    box.scrollTop = box.scrollHeight;
-    if (j.running) { setTimeout(() => pollJob(name), 1200); }
-    else { box.textContent += `\\n\\n--- finished (exit ${j.rc}) ---`; box.scrollTop = box.scrollHeight; fetchImages(); }
-  } catch (e) { box.textContent += '\\npoll error: ' + e; }
+    const r = await fetch(`/api/scope/${name}/${action}`, init);
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      BOXJOBS[name] = {kind, running: false, rc: 1, log: 'error: ' + (j.detail || r.status)};
+      toast(`${name}: ${kind} failed — ${j.detail || r.status}`); refresh(); return;
+    }
+  } catch (e) {
+    BOXJOBS[name] = {kind, running: false, rc: 1, log: 'request failed: ' + e};
+    toast(`${name}: ${kind} — request failed`); refresh(); return;
+  }
+  toast(`${name}: ${kind} started (running in background)`);
+  pollBoxJob(name);
+}
+async function pollBoxJob(name) {
+  let j;
+  try { j = await (await fetch(`/api/scope/${name}/job`)).json(); }
+  catch (e) { setTimeout(() => pollBoxJob(name), 3000); return; }
+  BOXJOBS[name] = j;
+  if (MODAL_JOB === name && document.getElementById('modal').classList.contains('show')) {
+    const box = document.getElementById('modalbody');
+    box.textContent = j.log || '(starting…)'; box.scrollTop = box.scrollHeight;
+  }
+  if (j.running) { setTimeout(() => pollBoxJob(name), 1500); return; }
+  toast(`${name}: ${j.kind || 'job'} ${j.rc === 0 ? 'finished ✓' : 'exited ' + j.rc}`);
+  refresh(); fetchImages();
+}
+// Open the (dismissible) modal on a box's job log. Closing it does NOT stop the job.
+function viewJob(name) {
+  MODAL_JOB = name;
+  const job = BOXJOBS[name] || {};
+  document.getElementById('modaltitle').textContent = `${name} — ${job.kind || 'job'}`;
+  document.getElementById('modalbody').textContent = job.log || '(no output yet)';
+  document.getElementById('modal').classList.add('show');
+}
+// After a page (re)load, re-attach to any jobs still running server-side so their inline
+// progress reappears instead of silently vanishing.
+async function reattachJobs() {
+  let scopes;
+  try { scopes = await (await fetch('/api/microscopes')).json(); } catch (e) { return; }
+  await Promise.all(scopes.map(async m => {
+    try {
+      const j = await (await fetch(`/api/scope/${m.name}/job`)).json();
+      if (j && j.running) { BOXJOBS[m.name] = j; pollBoxJob(m.name); }
+    } catch (e) {}
+  }));
+  refresh();
 }
 
 async function fetchGateway() {
@@ -1101,14 +1148,8 @@ async function removeScope(name) {
 function changeIp(name) {
   const ip = prompt('New backbone IP for ' + name + ' (inside the backbone subnet):');
   if (!ip) return;
-  if (!confirm('Renumber ' + name + ' to ' + ip + '?\\n\\nApplies the new IP on the box over SSH — keeps the old address until the new one is confirmed, and auto-reverts on failure — then re-points the proxy. Takes ~30s.')) return;
-  openModal('Renumber ' + name + ' → ' + ip);
-  fetch('/api/scope/' + name + '/set-ip', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ip})})
-    .then(async r => {
-      if (!r.ok) { const j = await r.json().catch(() => ({})); document.getElementById('modalbody').textContent = 'error: ' + (j.detail || r.status); return; }
-      pollJob(name);
-    })
-    .catch(e => { document.getElementById('modalbody').textContent = 'request failed: ' + e; });
+  startJob(name, 'set-ip', 'set-ip', {body: {ip}, confirmMsg:
+    'Renumber ' + name + ' to ' + ip + '?\\n\\nApplies the new IP over SSH (keeps the old address until the new one is confirmed, auto-reverts on failure), then re-points the proxy. Runs in the background (~30s).'});
 }
 async function gatewayRebuild() {
   if (!confirm('Fetch latest git + rebuild BOTH images on the gateway?\\n\\nUpdates the registry only — no box is touched. Takes several minutes.')) return;
@@ -1141,14 +1182,15 @@ async function gatewayReboot() {
 }
 function updateOs(name) {
   const reg = (IMAGES.registry.os || {});
-  const to = reg.version || short(reg.digest);
-  if (!confirm(`Update OS on ${name} → ${to}?\\n\\nDownloads + stages the new OS image (bootc upgrade). It does NOT reboot — the box keeps running until you click Reboot to activate it (bad boots auto-roll-back). Do idle boxes only.`)) return;
-  runJob(name, 'update-os', `Update OS — ${name} → ${to}`);
+  const to = ftime(reg.created) || reg.version || short(reg.digest);
+  startJob(name, 'update-os', 'update-os', {confirmMsg:
+    `Update OS on ${name} → ${to}?\\n\\nDownloads + stages the new OS image (bootc upgrade) in the BACKGROUND — you can keep using the dashboard. It does NOT reboot; click Reboot to activate (bad boots auto-roll-back). Do idle boxes only.`});
 }
 function updateApp(name) {
   const reg = (IMAGES.registry.seafront || {});
-  if (!confirm(`Update seafront image on ${name} → ${short(reg.digest)}?\\n\\nPulls the latest app image (podman pull). It does NOT restart the container — click Restart service to apply, so a running acquisition is undisturbed.`)) return;
-  runJob(name, 'update-seafront', `Update seafront — ${name} → ${short(reg.digest)}`);
+  const to = ftime(reg.created) || short(reg.digest);
+  startJob(name, 'update-seafront', 'update-seafront', {confirmMsg:
+    `Update seafront on ${name} → ${to}?\\n\\nPulls the latest app image (podman pull) in the BACKGROUND. It does NOT restart the container — click Restart service to apply.`});
 }
 
 function microscopeDialog(name) {
@@ -1199,6 +1241,12 @@ async function refresh() {
     const osd = img.os || {}, appd = img.seafront || {};
     const osStale = osd.available && !osd.up_to_date && !osd.staged_latest && (IMAGES.registry.os || {}).digest;
     const appStale = appd.present && !appd.up_to_date && (IMAGES.registry.seafront || {}).digest;
+    const job = BOXJOBS[m.name];
+    const jobRunning = !!(job && job.running);
+    const jr = jobRunning ? 'disabled' : '';
+    let jobLine = '';
+    if (jobRunning) jobLine = `<div class="ver jobrun">⏳ ${job.kind}… <button class="linkbtn" onclick="viewJob('${m.name}')">view log</button></div>`;
+    else if (job && job.rc != null && job.rc !== 0) jobLine = `<div class="ver stale">⚠ ${job.kind} failed (exit ${job.rc}) <button class="linkbtn" onclick="viewJob('${m.name}')">log</button></div>`;
     card.innerHTML = `
       <div class="name">${m.name}</div>
       <div class="signals">
@@ -1209,17 +1257,18 @@ async function refresh() {
       <div class="ver">${osLine(osd, IMAGES.registry.os)}</div>
       <div class="ver">${appLine(appd, IMAGES.registry.seafront)}</div>
       ${img.stale_seconds ? `<div class="ver stale">⏳ last read failed — showing values from ${img.stale_seconds}s ago</div>` : ''}
+      ${jobLine}
       <div class="btns">
         <a class="open ${m.service_up ? '' : 'down'}" href="${url}">${m.service_up ? 'Open' : 'Offline'}</a>
         <button onclick="act('${m.name}','restart-service')">Restart service</button>
         <button onclick="view('${m.name}','config')">View config</button>
         <button onclick="view('${m.name}','logs')">View logs</button>
-        <button class="${osStale ? 'hot' : ''}" onclick="updateOs('${m.name}')">Update OS</button>
-        <button class="${appStale ? 'hot' : ''}" onclick="updateApp('${m.name}')">Update seafront</button>
-        <button onclick="changeIp('${m.name}')">Change IP</button>
+        <button class="${osStale ? 'hot' : ''}" ${jr} onclick="updateOs('${m.name}')">Update OS</button>
+        <button class="${appStale ? 'hot' : ''}" ${jr} onclick="updateApp('${m.name}')">Update seafront</button>
+        <button ${jr} onclick="changeIp('${m.name}')">Change IP</button>
         <button class="danger" onclick="removeScope('${m.name}')">Remove</button>
         <button style="grid-column:1/3" onclick="microscopeDialog('${m.name}')">🔬 Profile: ${(IMAGES.boxes[m.name]||{}).active || 'default'}</button>
-        <button class="danger" style="grid-column:1/3"
+        <button class="danger" style="grid-column:1/3" ${jr}
           onclick="act('${m.name}','reboot','Reboot ${m.name} (${m.host})? This interrupts anything running on it.')">
           Reboot computer</button>
       </div>`;
@@ -1233,6 +1282,7 @@ async function refresh() {
 fetchImages();
 fetchGateway();
 fetchWifi();
+reattachJobs();
 setInterval(refresh, 1000);
 setInterval(fetchImages, 30000);   // image info needs SSH per box — poll gently
 setInterval(fetchGateway, 15000);  // gateway git/rebuild state (local, cheap)
