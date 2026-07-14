@@ -28,12 +28,14 @@ Config comes from ../config/microscopes.json (shared with the Caddyfile
 generator), so there is one source of truth.
 """
 import asyncio
+import copy
 import ipaddress
 import json
 import os
 import pathlib
 import shlex
 import sys
+import time
 
 import httpx
 from fastapi import FastAPI, HTTPException
@@ -64,6 +66,11 @@ def scope_or_404(name: str) -> dict:
 SSH_KEY = os.environ.get("FLEET_SSH_KEY", os.path.expanduser("~/.ssh/fleet"))
 SSH_USER = os.environ.get("FLEET_SSH_USER", "pharmbio")
 SEAFRONT_CONFIG_PATH = "~/seafront/config.json"  # on the scope
+# Multiplexed-connection socket, one per remote user@host:port. Reusing a single warm
+# master connection per box (see _ssh_base) is what keeps continuous polling from
+# opening a fresh SSH each time — the connection flood that trips the boxes' per-source
+# SSH penalty. %r/%h/%p are expanded by ssh, not here.
+CONTROL_PATH = os.environ.get("FLEET_SSH_CONTROL_PATH", os.path.expanduser("~/.ssh/cm-%r@%h:%p"))
 
 # The gateway registry and the two images it serves. Boxes reference these exact
 # refs (bootc spec.image and the seafront quadlet Image=), so the same string is
@@ -154,6 +161,20 @@ def _ssh_base(name: str) -> list[str]:
         "-o", "UserKnownHostsFile=/dev/null",
         "-o", "LogLevel=ERROR",                   # drop the "added to known hosts" warning
         "-o", "ConnectTimeout=5",
+        # REUSE ONE CONNECTION PER BOX. The dashboard polls every box continuously; a
+        # fresh SSH per read is a flood of short-lived connections from one source IP,
+        # which trips the boxes' OpenSSH PerSourcePenalties (9.8+, default on): they then
+        # RESET our connections for a cooldown ("kex_exchange_identification: Connection
+        # reset by peer"), surfacing as flaky / "OS: unknown" reads that come and go. With
+        # a multiplexed master (auto + persist), reads after the first share one warm
+        # connection — no per-read handshake, no connection flood, no penalty. The box
+        # image also exempts the backbone (sshd_config.d/10-fleet.conf) as belt-and-braces.
+        "-o", "ControlMaster=auto",
+        "-o", f"ControlPath={CONTROL_PATH}",
+        "-o", "ControlPersist=60",
+        # No KDC/DNS on the isolated backbone, so GSSAPI only adds a per-connection
+        # name-lookup cost and buys nothing (we authenticate by key).
+        "-o", "GSSAPIAuthentication=no",
         f"{SSH_USER}@{m['host']}", "--",
     ]
 
@@ -273,22 +294,42 @@ _BOX_IMAGES_CMD = (
 )
 
 
+# Last successful per-box read, so a transient SSH failure serves stale-but-real data
+# instead of blanking the box to "unknown". Keyed by name -> (result, monotonic time).
+_LAST_BOX_IMAGES: dict[str, tuple[dict, float]] = {}
+
+
 async def _box_images(name: str) -> dict:
     # Single argv element: ssh space-joins argv and the remote shell re-parses, so
     # the `;`/redirection are interpreted on the box (not locally).
+    out = ""
     try:
         _rc, out, _err = await _ssh(name, [_BOX_IMAGES_CMD], timeout=15.0)
     except HTTPException:
+        out = ""
+    # The command echoes '<<<SPLIT>>>' between sections unconditionally, so its presence
+    # proves the SSH actually ran the command — vs. a reset/timeout that returns nothing.
+    # On a real failure, serve the last good read (flagged with its age) rather than
+    # collapsing a healthy box to "unknown" on one transient miss (the flaky-read symptom).
+    if "<<<SPLIT>>>" not in out:
+        cached = _LAST_BOX_IMAGES.get(name)
+        if cached:
+            result, ts = cached
+            served = copy.deepcopy(result)
+            served["stale_seconds"] = int(time.monotonic() - ts)
+            return served
         return {"name": name, "os": {"available": False}, "seafront": {"present": False},
-                "microscopes": [], "active": None}
+                "microscopes": [], "active": None, "stale_seconds": None}
     parts = out.split("<<<SPLIT>>>")
     os_part = parts[0] if len(parts) > 0 else ""
     app_part = parts[1] if len(parts) > 1 else ""
     prof_part = parts[2] if len(parts) > 2 else ""
     active_part = parts[3] if len(parts) > 3 else ""
     profiles = [p.strip() for p in prof_part.splitlines() if p.strip()]
-    return {"name": name, "os": _parse_bootc(os_part), "seafront": _parse_app(app_part),
-            "microscopes": profiles, "active": active_part.strip() or None}
+    result = {"name": name, "os": _parse_bootc(os_part), "seafront": _parse_app(app_part),
+              "microscopes": profiles, "active": active_part.strip() or None}
+    _LAST_BOX_IMAGES[name] = (copy.deepcopy(result), time.monotonic())
+    return {**result, "stale_seconds": 0}
 
 
 @app.get("/api/images")
@@ -1158,6 +1199,7 @@ async function refresh() {
       <div class="meta">${m.host}:${m.proxy_port}</div>
       <div class="ver">${osLine(osd, IMAGES.registry.os)}</div>
       <div class="ver">${appLine(appd, IMAGES.registry.seafront)}</div>
+      ${img.stale_seconds ? `<div class="ver stale">⏳ last read failed — showing values from ${img.stale_seconds}s ago</div>` : ''}
       <div class="btns">
         <a class="open ${m.service_up ? '' : 'down'}" href="${url}">${m.service_up ? 'Open' : 'Offline'}</a>
         <button onclick="act('${m.name}','restart-service')">Restart service</button>
