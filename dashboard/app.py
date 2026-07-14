@@ -38,7 +38,7 @@ import sys
 import time
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 
@@ -179,18 +179,37 @@ def _ssh_base(name: str) -> list[str]:
     ]
 
 
-async def _ssh(name: str, argv: list[str], timeout: float = 20.0) -> tuple[int, str, str]:
+async def _ssh(name: str, argv: list[str], timeout: float = 20.0,
+               input: str | None = None) -> tuple[int, str, str]:
     """Run a command on a scope over SSH with the fleet key. `argv` is appended
-    after `--`; scope name/host come only from our config, never client input."""
+    after `--`; scope name/host come only from our config, never client input.
+    `input`, if given, is fed to the remote command's stdin (e.g. a config piped to
+    `cat > file`)."""
     cmd = _ssh_base(name) + argv
     try:
         proc = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            *cmd,
+            stdin=asyncio.subprocess.PIPE if input is not None else None,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        out, err = await asyncio.wait_for(
+            proc.communicate(input.encode() if input is not None else None), timeout=timeout)
     except asyncio.TimeoutError:
         raise HTTPException(504, f"ssh to {name} timed out")
     return proc.returncode or 0, out.decode(errors="replace"), err.decode(errors="replace")
+
+
+async def _wait_service_up(name: str, timeout: float = 15.0) -> bool:
+    """Poll the box's seafront HTTP port until it answers, up to `timeout`s — used to confirm
+    a config change actually booted (a crash-looping seafront never serves)."""
+    m = scope_or_404(name)
+    deadline = time.monotonic() + timeout
+    async with httpx.AsyncClient() as client:
+        while time.monotonic() < deadline:
+            if await _service_up(client, m["host"], m["seafront_port"]):
+                return True
+            await asyncio.sleep(2)
+    return False
 
 
 # --- image versions: gateway registry vs each box -----------------------------
@@ -397,6 +416,48 @@ async def get_config(name: str) -> str:
     if rc != 0:
         raise HTTPException(502, f"could not read config: {err or out}".strip())
     return out
+
+
+@app.post("/api/scope/{name}/config")
+async def set_config(name: str, request: Request) -> JSONResponse:
+    """Replace a box's ~/seafront/config.json and restart seafront. The body is validated as
+    JSON, written atomically (config.json is root-owned by the container, but its dir is
+    pharmbio-owned, so temp-file + mv works), and the box is restarted. If seafront does not
+    come back up on it within ~15s, the PREVIOUS config is restored automatically — a bad
+    config can't leave the box crash-looping. On success the gateway's central store
+    (configs/<name>/config.json) is updated so push-config / reflash keep the change."""
+    scope_or_404(name)
+    raw = (await request.body()).decode("utf-8", "replace")
+    try:
+        cfg = json.loads(raw)
+    except Exception as e:
+        raise HTTPException(400, f"not valid JSON: {e}")
+    if not isinstance(cfg, dict) or not isinstance(cfg.get("microscopes"), list):
+        raise HTTPException(400, "config must be a JSON object with a 'microscopes' array")
+    text = json.dumps(cfg, indent=4) + "\n"
+
+    # Keep the current config in memory so we can restore it if the new one won't boot.
+    _rc, prev, _err = await _ssh(name, ["cat ~/seafront/config.json 2>/dev/null || true"], timeout=20.0)
+
+    push = ("cat > ~/seafront/config.json.new"
+            " && mv -f ~/seafront/config.json.new ~/seafront/config.json"
+            " && sudo -n /usr/bin/systemctl restart seafront && echo PUSH_OK")
+    rc, out, err = await _ssh(name, [push], input=text, timeout=120.0)
+    if "PUSH_OK" not in out:
+        raise HTTPException(502, f"could not write config: {(err or out).strip()}")
+
+    if await _wait_service_up(name, timeout=15.0):
+        central = ROOT / "configs" / name / "config.json"
+        central.parent.mkdir(parents=True, exist_ok=True)
+        central.write_text(text)
+        return JSONResponse({"ok": True, "verified": True})
+
+    # New config did not serve — restore the previous one so the box isn't left crash-looping.
+    if prev.strip():
+        await _ssh(name, [push], input=prev, timeout=120.0)
+        raise HTTPException(422, "new config did not come up (seafront failed to serve) — "
+                                 "reverted to the previous config")
+    raise HTTPException(422, "new config did not come up, and there was no previous config to restore")
 
 
 @app.get("/api/scope/{name}/logs", response_class=PlainTextResponse)
@@ -822,6 +883,18 @@ HTML = """<!doctype html>
   .adderr { color: #f85149; font-size: .8rem; min-height: 1.1em; }
   .addbtns { display: flex; justify-content: flex-end; gap: 8px; margin-top: 2px; }
   button.primary { background: #238636; border-color: #238636; color: #fff; }
+  #cfgmodal { position: fixed; inset: 0; background: #000a; display: none; z-index: 10;
+              padding: 32px; align-items: center; justify-content: center; }
+  #cfgmodal.show { display: flex; }
+  #cfgbox { background: #0d1117; border: 1px solid #30363d; border-radius: 12px;
+            width: 100%; max-width: 820px; display: flex; flex-direction: column; max-height: 100%; }
+  #cfghead { display: flex; justify-content: space-between; align-items: center;
+             padding: 14px 18px; border-bottom: 1px solid #30363d; }
+  .cfgform { padding: 16px 18px; display: flex; flex-direction: column; gap: 12px; min-height: 0; }
+  #cfgtext { width: 100%; height: 55vh; resize: vertical; box-sizing: border-box;
+             font: 13px/1.45 ui-monospace, monospace; padding: 10px; border-radius: 8px;
+             border: 1px solid #30363d; background: #0e1116; color: #e6edf3; }
+  #cfgtext:focus { outline: none; border-color: #58a6ff; }
 </style>
 </head>
 <body>
@@ -893,6 +966,21 @@ HTML = """<!doctype html>
   </div>
 </div>
 
+<div id="cfgmodal" onclick="if(event.target===this)closeCfg()">
+  <div id="cfgbox">
+    <div id="cfghead"><strong id="cfgtitle">config</strong>
+      <button onclick="closeCfg()">close</button></div>
+    <div class="cfgform">
+      <textarea id="cfgtext" spellcheck="false" autocomplete="off"></textarea>
+      <div class="adderr" id="cfgerr"></div>
+      <div class="addbtns">
+        <button onclick="closeCfg()">Cancel</button>
+        <button id="cfgsave" class="primary" onclick="saveConfig()">Save + restart</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
 function toast(msg) {
   const t = document.getElementById('toast');
@@ -948,6 +1036,43 @@ async function act(name, action, confirmMsg) {
     toast(r.ok ? `${name}: ${action} ok` : `${name}: ${action} failed — ${j.detail || r.status}`);
   } catch (e) { toast(`${name}: ${action} failed — ${e}`); }
   setTimeout(() => { refresh(); fetchImages(); }, 1500);
+}
+
+// Edit a box's config.json: load it into a textarea, validate JSON on save, POST it. The
+// server writes it, restarts seafront, and auto-reverts if the box doesn't come back up.
+async function editConfig(name) {
+  const ta = document.getElementById('cfgtext'), err = document.getElementById('cfgerr');
+  document.getElementById('cfgtitle').textContent = name + ' — config.json';
+  ta.value = 'loading…'; err.textContent = '';
+  document.getElementById('cfgsave').disabled = true;
+  const m = document.getElementById('cfgmodal'); m.dataset.box = name; m.classList.add('show');
+  try {
+    const r = await fetch(`/api/scope/${name}/config`);
+    const t = await r.text();
+    if (!r.ok) { ta.value = ''; err.textContent = 'could not load config: ' + t; return; }
+    ta.value = t;
+    document.getElementById('cfgsave').disabled = false;
+  } catch (e) { ta.value = ''; err.textContent = 'load failed: ' + e; }
+}
+function closeCfg() { document.getElementById('cfgmodal').classList.remove('show'); }
+async function saveConfig() {
+  const name = document.getElementById('cfgmodal').dataset.box;
+  const ta = document.getElementById('cfgtext'), err = document.getElementById('cfgerr');
+  const btn = document.getElementById('cfgsave');
+  let parsed;
+  try { parsed = JSON.parse(ta.value); }
+  catch (e) { err.textContent = 'invalid JSON: ' + e.message; return; }
+  if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.microscopes)) {
+    err.textContent = "config must be a JSON object with a 'microscopes' array"; return;
+  }
+  if (!confirm(`Save config to ${name} and restart seafront?\\n\\nIf seafront does not come back up within ~15s, the box is automatically reverted to its previous config.`)) return;
+  btn.disabled = true; err.textContent = 'saving + restarting + verifying (up to ~20s)…';
+  try {
+    const r = await fetch(`/api/scope/${name}/config`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: ta.value});
+    const j = await r.json().catch(() => ({}));
+    if (r.ok) { closeCfg(); toast(name + ': config saved + seafront restarted ✓'); setTimeout(() => { refresh(); fetchImages(); }, 1000); }
+    else { err.textContent = j.detail || ('failed (HTTP ' + r.status + ')'); btn.disabled = false; }
+  } catch (e) { err.textContent = 'request failed: ' + e; btn.disabled = false; }
 }
 
 let IMAGES = {registry: {}, boxes: {}};
@@ -1261,7 +1386,7 @@ async function refresh() {
       <div class="btns">
         <a class="open ${m.service_up ? '' : 'down'}" href="${url}">${m.service_up ? 'Open' : 'Offline'}</a>
         <button onclick="act('${m.name}','restart-service')">Restart service</button>
-        <button onclick="view('${m.name}','config')">View config</button>
+        <button onclick="editConfig('${m.name}')">Config</button>
         <button onclick="view('${m.name}','logs')">View logs</button>
         <button class="${osStale ? 'hot' : ''}" ${jr} onclick="updateOs('${m.name}')">Update OS</button>
         <button class="${appStale ? 'hot' : ''}" ${jr} onclick="updateApp('${m.name}')">Update seafront</button>
