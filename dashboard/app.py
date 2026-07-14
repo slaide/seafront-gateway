@@ -831,7 +831,8 @@ HTML = """<!doctype html>
       <span class="flag idle" id="gwstate">idle</span>
     </div>
     <div class="ver" id="gwgit">git …</div>
-    <div class="ver">registry serves — OS <b id="regos">…</b> · seafront <b id="regapp">…</b></div>
+    <div class="ver">registry — <b id="regos">…</b></div>
+    <div class="ver">registry — <b id="regapp">…</b></div>
     <div class="ver">repos — <a id="repogw" class="repolink" target="_blank" rel="noopener">seafront-gateway</a> · <a id="reposf" class="repolink" target="_blank" rel="noopener">seafront</a></div>
     <div class="ver" id="gwwifi">wifi …</div>
     <div class="gwbtns">
@@ -897,22 +898,30 @@ function toast(msg) {
 }
 function short(d) { return d ? d.replace('sha256:', '').slice(0, 12) : '?'; }
 function fdate(iso) { if (!iso) return ''; const t = new Date(iso); return isNaN(t) ? '' : t.toLocaleDateString(); }
+// Full build timestamp as YYYYMMDD-HHMM (local time) — distinguishes multiple rebuilds/day.
+function ftime(iso) {
+  if (!iso) return '';
+  const t = new Date(iso); if (isNaN(t)) return '';
+  const p = n => String(n).padStart(2, '0');
+  return `${t.getFullYear()}${p(t.getMonth()+1)}${p(t.getDate())}-${p(t.getHours())}${p(t.getMinutes())}`;
+}
 
 function osLine(o, reg) {
   if (!o || o.available === false) return '<span class="muted">OS: unknown (needs image-based box)</span>';
   const v = o.version || short(o.digest);
+  const t = ftime(o.timestamp);
   let badge = '';
-  if (o.staged_latest) badge = ' <span class="staged">staged ' + (o.staged_version || '') + ' — reboot to apply</span>';
+  if (o.staged_latest) badge = ' <span class="staged">staged ' + (ftime(reg && reg.created) || o.staged_version || '') + ' — reboot to apply</span>';
   else if (o.up_to_date) badge = ' <span class="ok">up to date</span>';
-  else if (reg && reg.digest) badge = ' <span class="stale">update → ' + (reg.version || short(reg.digest)) + '</span>';
-  return 'OS ' + v + badge;
+  else if (reg && reg.digest) badge = ' <span class="stale">update → ' + (ftime(reg.created) || reg.version || short(reg.digest)) + '</span>';
+  return 'OS ' + v + (t ? ' · ' + t : '') + ' · ' + short(o.digest) + badge;
 }
 function appLine(a, reg) {
   if (!a || a.present === false) return '<span class="muted">seafront image: not present</span>';
-  const d = fdate(a.created);
-  let s = 'seafront ' + short(a.digest) + (d ? ' (' + d + ')' : '');
+  const t = ftime(a.created);
+  let s = 'seafront' + (t ? ' ' + t : '') + ' · ' + short(a.digest);
   if (a.up_to_date) s += ' <span class="ok">up to date</span>';
-  else if (reg && reg.digest) s += ' <span class="stale">update → ' + short(reg.digest) + '</span>';
+  else if (reg && reg.digest) s += ' <span class="stale">update → ' + (ftime(reg.created) || short(reg.digest)) + '</span>';
   return s;
 }
 
@@ -945,9 +954,9 @@ async function fetchImages() {
     (d.boxes || []).forEach(b => IMAGES.boxes[b.name] = b);
     const ro = IMAGES.registry.os || {}, ra = IMAGES.registry.seafront || {};
     document.getElementById('regos').textContent =
-      'OS ' + (ro.error ? '(error)' : (ro.version || short(ro.digest)));
+      'OS ' + (ro.error ? '(error)' : ((ro.version || short(ro.digest)) + (ftime(ro.created) ? ' · ' + ftime(ro.created) : '') + ' · ' + short(ro.digest)));
     document.getElementById('regapp').textContent =
-      'seafront ' + (ra.error ? '(error)' : short(ra.digest)) + (fdate(ra.created) ? ' (' + fdate(ra.created) + ')' : '');
+      'seafront ' + (ra.error ? '(error)' : ((ftime(ra.created) ? ftime(ra.created) + ' · ' : '') + short(ra.digest)));
   } catch (e) { document.getElementById('regos').textContent = 'OS (unreachable)'; }
   refresh();
 }
