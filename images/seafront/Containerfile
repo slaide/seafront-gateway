@@ -2,7 +2,7 @@
 # Built on the gateway (which has on-demand internet), pushed to the gateway registry,
 # pulled by every box. No pip/uv/wheel resolution ever happens on a box.
 #
-#   podman build -t 192.168.50.1:5000/seafront:stable \
+#   podman build -t 10.10.0.69:5000/seafront:stable \
 #     --build-arg SEAFRONT_REF=<sha|tag> images/seafront
 #
 # The custom VCS deps (gxipy/toupcam/seaconfig) are fetched by `uv sync` at build time,

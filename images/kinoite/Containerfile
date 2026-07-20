@@ -2,7 +2,7 @@
 # OCI image (Fedora Kinoite / KDE, immutable, via bootc). Built on the gateway,
 # pushed to the gateway registry, tracked by every box with `bootc upgrade`.
 #
-#   podman build -t 192.168.50.1:5000/seafront-os:stable images/kinoite
+#   podman build -t 10.10.0.69:5000/seafront-os:stable images/kinoite
 #
 # Everything a box needs is baked in here so provisioning is "flash, done":
 #   - podman + the seafront quadlet (pulls the app image from the gateway registry)

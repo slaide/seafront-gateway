@@ -6,8 +6,8 @@
 #
 # IMPORTANT sudoers gotcha: a literal `:` in a command spec is parsed as a
 # host/command-spec separator and INVALIDATES the whole file (sudo then ignores
-# it). The registry ref is 192.168.50.1:5000/... — never write that colon here.
-# Instead match with the `192.168.50.1*` wildcard: fnmatch on arguments does not
+# it). The registry ref is 10.10.0.69:5000/... — never write that colon here.
+# Instead match with the `10.10.0.69*` wildcard: fnmatch on arguments does not
 # treat `:` or `/` specially, so it matches the full ref, and the file stays valid.
 # Each entry has a single wildcard-matched trailing arg, like `bootc switch *`.
 pharmbio ALL=(root) NOPASSWD: \
@@ -20,8 +20,8 @@ pharmbio ALL=(root) NOPASSWD: \
     /usr/bin/bootc status *, \
     /usr/bin/bootc upgrade, \
     /usr/bin/bootc switch *, \
-    /usr/bin/podman image inspect 192.168.50.1*, \
-    /usr/bin/podman pull 192.168.50.1*, \
+    /usr/bin/podman image inspect 10.10.0.69*, \
+    /usr/bin/podman pull 10.10.0.69*, \
     /usr/bin/nmcli connection modify *, \
     /usr/bin/nmcli connection up *, \
     /usr/bin/nmcli device reapply *, \

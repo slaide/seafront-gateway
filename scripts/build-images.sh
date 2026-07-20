@@ -9,7 +9,7 @@
 #   SEAFRONT_REF=<sha|tag> build-images.sh --seafront
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-REG="${REGISTRY:-192.168.50.1:5000}"
+REG="${REGISTRY:-10.10.0.69:5000}"
 # Pinned seafront commit (source of truth). A gateway commit + this SHA + seafront's
 # committed uv.lock fully determine the app image. Bump this to roll the app forward;
 # override with SEAFRONT_REF=<sha|tag> only for one-off testing.

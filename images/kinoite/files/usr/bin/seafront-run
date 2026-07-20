@@ -18,7 +18,7 @@
 set -euo pipefail
 [ "$(id -u)" = 0 ] || exec sudo -- "$0" "$@"
 
-IMAGE="${SEAFRONT_IMAGE:-192.168.50.1:5000/seafront:stable}"
+IMAGE="${SEAFRONT_IMAGE:-10.10.0.69:5000/seafront:stable}"
 
 # Match the seafront quadlet's device access: the whole USB tree + cgroup rules for
 # usb (major 189, libusb cameras) and ttyACM (166, Teensy serial). label=disable

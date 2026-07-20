@@ -6,7 +6,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Container]
-Image=192.168.50.1:5000/seafront:stable
+Image=10.10.0.69:5000/seafront:stable
 PublishPort=8000:8000
 # Persistent state on the writable host partition (survives OS upgrades).
 # config.json is pushed here by the gateway (scripts/push-config.sh); images land here too.
@@ -48,7 +48,7 @@ AddDevice=-/dev/ttyACM1
 Restart=always
 RestartSec=5
 # Refresh from the gateway registry on start if reachable; keep the local image when offline.
-ExecStartPre=-/usr/bin/podman pull 192.168.50.1:5000/seafront:stable
+ExecStartPre=-/usr/bin/podman pull 10.10.0.69:5000/seafront:stable
 
 [Install]
 WantedBy=multi-user.target default.target

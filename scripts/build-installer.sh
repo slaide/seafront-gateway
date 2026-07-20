@@ -15,7 +15,7 @@
 # gateway-setup.sh must have installed the insecure-registry trust (it does).
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-REG="${REGISTRY:-192.168.50.1:5000}"
+REG="${REGISTRY:-10.10.0.69:5000}"
 OUT="${OUT:-$DIR/out}"
 TYPE="${TYPE:-anaconda-iso}"     # anaconda-iso | raw | qcow2
 CONFIG="$DIR/images/kinoite/installer.toml"   # optional: bakes the pharmbio user

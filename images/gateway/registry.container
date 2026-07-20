@@ -8,8 +8,8 @@ Wants=network-online.target
 
 [Container]
 Image=docker.io/library/registry:2
-# gateway's backbone IP; boxes pull from here (no internet involved)
-PublishPort=192.168.50.1:5000:5000
+# gateway's fleet-LAN IP; boxes pull from here
+PublishPort=10.10.0.69:5000:5000
 # persistent image store on the writable /var partition
 Volume=/var/lib/seafront-registry:/var/lib/registry:Z
 

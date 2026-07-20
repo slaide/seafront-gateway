@@ -11,12 +11,12 @@
 # and dashboard will point at the wrong address.
 #
 #   sudo box-postinstall <name> <ip>[/prefix]     # /24 assumed if no prefix
-#   sudo box-postinstall squid3 192.168.50.13     # hostname squid3, 192.168.50.13/24
+#   sudo box-postinstall squid3 10.10.0.13     # hostname squid3, 10.10.0.13/24
 set -euo pipefail
 [ "$(id -u)" = 0 ] || { echo "run with sudo"; exit 1; }
 
-NAME="${1:?usage: box-postinstall <name> <ip>[/prefix]   (e.g. squid3 192.168.50.13)}"
-ADDR="${2:?usage: box-postinstall <name> <ip>[/prefix]   (e.g. squid3 192.168.50.13)}"
+NAME="${1:?usage: box-postinstall <name> <ip>[/prefix]   (e.g. squid3 10.10.0.13)}"
+ADDR="${2:?usage: box-postinstall <name> <ip>[/prefix]   (e.g. squid3 10.10.0.13)}"
 # split IP/prefix; default to /24 (the backbone) when none is given
 if [[ "$ADDR" == */* ]]; then PREFIX="${ADDR#*/}"; IP="${ADDR%/*}"; else PREFIX="24"; IP="$ADDR"; fi
 

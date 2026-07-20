@@ -6,7 +6,7 @@ box runs versus the latest built in the gateway registry, and offers per-scope
 maintenance actions.
 
 Everything the fleet ships is an OCI image pulled from the gateway registry
-(192.168.50.1:5000): the whole box OS (Fedora Kinoite, tracked with `bootc`) and
+(10.10.0.69:5000): the whole box OS (Fedora Kinoite, tracked with `bootc`) and
 the seafront app (a podman container). So "which version is a box on?" is a
 digest comparison, and updating is either `bootc upgrade` (OS) or `podman pull`
 (app) — two INDEPENDENT routes with their own buttons.
@@ -75,7 +75,7 @@ CONTROL_PATH = os.environ.get("FLEET_SSH_CONTROL_PATH", os.path.expanduser("~/.s
 # The gateway registry and the two images it serves. Boxes reference these exact
 # refs (bootc spec.image and the seafront quadlet Image=), so the same string is
 # both what we query in the registry and what we compare against on the box.
-REGISTRY = os.environ.get("FLEET_REGISTRY", "192.168.50.1:5000")
+REGISTRY = os.environ.get("FLEET_REGISTRY", "10.10.0.69:5000")
 OS_REPO = "seafront-os"
 APP_REPO = "seafront"
 APP_IMAGE = f"{REGISTRY}/{APP_REPO}:stable"
@@ -938,7 +938,7 @@ HTML = """<!doctype html>
       <button onclick="closeAdd()">close</button></div>
     <div class="addform" onkeydown="if(event.key==='Enter')submitAdd(); if(event.key==='Escape')closeAdd();">
       <label>Name<input id="f-name" placeholder="e.g. squid5" autocomplete="off"></label>
-      <label>Backbone IP<input id="f-host" placeholder="e.g. 192.168.50.15 (inside backbone subnet)" autocomplete="off"></label>
+      <label>Backbone IP<input id="f-host" placeholder="e.g. 10.10.0.15 (inside backbone subnet)" autocomplete="off"></label>
       <label>Proxy port<input id="f-pp" placeholder="blank = auto-assign next free" autocomplete="off"></label>
       <label>Type<input id="f-type" value="squid" autocomplete="off"></label>
       <label>seafront port<input id="f-sp" value="8000" autocomplete="off"></label>

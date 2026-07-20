@@ -11,8 +11,8 @@ Schema (config/microscopes.json):
     {
       "gateway": {
         "dashboard_port": 8000,
-        "backbone": { "subnet": "192.168.50.0/24", "gateway_ip": "192.168.50.1" },
-        "lab": { "subnet": "10.10.0.0/24", "gateway_ip": "10.10.0.69" },  # optional
+        "backbone": { "subnet": "10.10.0.0/24", "gateway_ip": "10.10.0.69" },
+        "lab": { "subnet": "172.16.0.0/24", "gateway_ip": "172.16.0.1" },  # optional 2nd LAN
         "wifi": {
           "iface": "",                        # "" = auto-detect the radio; set to override
           "mode": "ap",                       # desired mode: "ap" | "client"
@@ -21,7 +21,7 @@ Schema (config/microscopes.json):
       },
       "microscopes": [
         { "name": "squid1", "type": "squid",
-          "host": "192.168.50.11", "lab_host": "10.10.0.11",  # lab_host optional
+          "host": "10.10.0.11",   # lab_host optional (only if a gateway.lab is defined)
           "seafront_port": 8000, "proxy_port": 8001 }
       ]
     }
@@ -55,7 +55,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CONFIG_PATH = ROOT / "config" / "microscopes.json"
 
-DEFAULT_SUBNET = "192.168.50.0/24"
+DEFAULT_SUBNET = "10.10.0.0/24"
 PROXY_PORT_BASE = 8001          # first auto-assigned proxy port
 PROXY_PORT_RANGE = (8001, 8099)  # ports apply-config.sh manages in the firewall
 
