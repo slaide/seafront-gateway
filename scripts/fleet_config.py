@@ -12,6 +12,7 @@ Schema (config/microscopes.json):
       "gateway": {
         "dashboard_port": 8000,
         "backbone": { "subnet": "192.168.50.0/24", "gateway_ip": "192.168.50.1" },
+        "lab": { "subnet": "10.10.0.0/24", "gateway_ip": "10.10.0.69" },  # optional
         "wifi": {
           "iface": "",                        # "" = auto-detect the radio; set to override
           "mode": "ap",                       # desired mode: "ap" | "client"
@@ -20,19 +21,24 @@ Schema (config/microscopes.json):
       },
       "microscopes": [
         { "name": "squid1", "type": "squid",
-          "host": "192.168.50.11", "seafront_port": 8000, "proxy_port": 8001 }
+          "host": "192.168.50.11", "lab_host": "10.10.0.11",  # lab_host optional
+          "seafront_port": 8000, "proxy_port": 8001 }
       ]
     }
 
 `host` may be any IPv4 address inside the backbone subnet; `name` is any unique
 DNS-safe label (no longer restricted to squid<n>). `type` is free-form metadata.
+`gateway.lab` and per-scope `lab_host` are OPTIONAL: a second LAN the machines are
+also reachable on. When present, `lab_host` must be a unique IPv4 inside `lab.subnet`.
+apply-lab-ips.sh adds these as secondary IPs; the backbone stays the primary path.
 
 CLI (for the shell scripts):
 
     fleet_config.py validate                 # exit non-zero + reasons if invalid
     fleet_config.py get gateway.wifi.iface   # print a dotted-path scalar
     fleet_config.py names                     # space-joined scope names
-    fleet_config.py host <name>               # a scope's IP ('' if unknown)
+    fleet_config.py host <name>               # a scope's backbone IP ('' if unknown)
+    fleet_config.py lab-host <name>           # a scope's lab IP ('' if none)
     fleet_config.py all-ports                 # dashboard_port + every proxy_port, one per line
     fleet_config.py proxy-ports               # every proxy_port, one per line
     fleet_config.py next-proxy-port           # lowest free proxy_port
@@ -82,6 +88,22 @@ def subnet(cfg: dict) -> ipaddress.IPv4Network:
     return net
 
 
+def lab(cfg: dict) -> dict:
+    "Optional second-LAN block ({} if absent)."
+    return cfg.get("gateway", {}).get("lab", {})
+
+
+def lab_subnet(cfg: dict) -> ipaddress.IPv4Network | None:
+    "The lab subnet, or None if no gateway.lab is configured."
+    sub = lab(cfg).get("subnet")
+    if not sub:
+        return None
+    net = ipaddress.ip_network(sub, strict=False)
+    if not isinstance(net, ipaddress.IPv4Network):
+        raise ValueError("lab subnet must be IPv4")
+    return net
+
+
 def by_name(cfg: dict, name: str) -> dict | None:
     return next((m for m in cfg["microscopes"] if m["name"] == name), None)
 
@@ -111,6 +133,18 @@ def validate(cfg: dict) -> None:
     names: set[str] = set()
     hosts: set[ipaddress.IPv4Address] = set()
     pports: set[int] = set()
+
+    # Optional lab (second-LAN) block. Only validated when present.
+    lab_net: ipaddress.IPv4Network | None = None
+    if lab(cfg):
+        try:
+            lab_net = lab_subnet(cfg)
+        except ValueError as e:
+            errs.append(f"invalid lab subnet: {e}")
+        lab_gw = lab(cfg).get("gateway_ip")
+        if lab_gw and lab_net is not None and ipaddress.ip_address(lab_gw) not in lab_net:
+            errs.append(f"gateway.lab.gateway_ip {lab_gw} is outside lab subnet {lab_net}")
+    lab_hosts: set[ipaddress.IPv4Address] = set()
 
     for m in cfg.get("microscopes", []):
         name = m.get("name", "")
@@ -142,6 +176,19 @@ def validate(cfg: dict) -> None:
             pports.add(pp)
             if pp == dash:
                 errs.append(f"{name}: proxy_port {pp} collides with dashboard_port")
+
+        lab_h = m.get("lab_host")
+        if lab_h is not None:
+            try:
+                lip = ipaddress.ip_address(lab_h)
+            except ValueError:
+                errs.append(f"{name}: invalid lab_host {lab_h!r}")
+            else:
+                if lip in lab_hosts:
+                    errs.append(f"duplicate lab_host: {lip}")
+                lab_hosts.add(lip)
+                if lab_net is not None and lip not in lab_net:
+                    errs.append(f"{name}: lab_host {lip} is outside lab subnet {lab_net}")
 
     if errs:
         raise ValueError("invalid fleet config:\n  - " + "\n  - ".join(errs))
@@ -217,6 +264,9 @@ def main(argv: list[str]) -> int:
     elif cmd == "host":
         m = by_name(cfg, rest[0])
         print(m["host"] if m else "")
+    elif cmd == "lab-host":
+        m = by_name(cfg, rest[0])
+        print(m.get("lab_host", "") if m else "")
     elif cmd == "all-ports":
         print(cfg["gateway"]["dashboard_port"])
         for m in cfg["microscopes"]:
