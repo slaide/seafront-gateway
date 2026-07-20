@@ -17,7 +17,11 @@ Environment=SEAFRONT_HOME=/root/seafront
 Environment=SEAFRONT_MICROSCOPE=mocroscope
 
 # ---------------------------------------------------------------------------
-# USB PASSTHROUGH — HARDWARE, VALIDATE ON A REAL BOX BEFORE FLEET ROLLOUT.
+# USB PASSTHROUGH — validated on squid1 (2026-07-20). Two host-side prerequisites
+# are handled by seafront-hardware-prep.service (baked in the OS image), NOT here:
+#   - cameras need the SELinux `container_use_devices` boolean (raw usbfs/libusb);
+#   - the Teensy `--device` is dropped by this quadlet at boot (see below) and
+#     re-attached by that unit after udev settles.
 # Robust-to-hotplug pattern: mount the whole usb tree + allow the device-cgroup
 # classes, rather than binding a single node that vanishes on replug.
 #   189 = usb (libusb cameras), 166 = ttyACM (Teensy CDC-ACM serial)
@@ -26,14 +30,17 @@ Volume=/dev/bus/usb:/dev/bus/usb
 # NOTE the quotes: each cgroup-rule value contains spaces, and quadlet splits
 # PodmanArgs on whitespace — unquoted, the unit parses into garbage.
 PodmanArgs=--device-cgroup-rule='c 189:* rmw' --device-cgroup-rule='c 166:* rmw'
-# SELinux is enforcing on Kinoite: raw USB/serial from a container is denied unless
-# either `setsebool -P container_use_devices on` on the box OR (blunter) add:
-#SecurityLabelDisable=true
 # The Teensy microcontroller is a USB CDC-ACM serial device; seafront finds/controls it
 # via pyserial, which needs the /dev/ttyACM* NODE inside the container (the /dev/bus/usb
 # mount above only gives raw libusb access, not the serial node). Pass it through. The
 # leading '-' makes each optional, so a box with no Teensy — e.g. running the mock profile
 # — still starts. The cgroup rule above already grants access to char-major-166 (ttyACM).
+#
+# GOTCHA (why seafront-hardware-prep.service exists): quadlet's optional-device '-' check
+# runs in the systemd GENERATOR at early boot, before udev creates /dev/ttyACM0, so it
+# evaluates "absent" and drops --device every boot. The prep unit daemon-reloads after
+# udev settles (regenerating this unit WITH --device) and restarts seafront. SELinux is
+# NOT involved for --device nodes (podman relabels them; they open fine with the boolean off).
 AddDevice=-/dev/ttyACM0
 AddDevice=-/dev/ttyACM1
 

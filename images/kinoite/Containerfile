@@ -44,6 +44,11 @@ RUN chmod 0440 /etc/sudoers.d/seafront-fleet \
 # the box at all (sshd off by default) and firewalld would block 8000 (remote web UI)
 # and even ssh. (localhost:8000 for the kiosk is loopback, never filtered.)
 RUN systemctl enable sshd.service
+# Boot-time USB/serial passthrough fixup for the seafront container: flips the SELinux
+# container_use_devices boolean on (cameras/libusb) and, once udev has created the Teensy
+# ttyACM node, regenerates the quadlet + restarts seafront so the serial device is attached
+# (quadlet's optional-device check runs too early at boot to see it). See the unit's header.
+RUN systemctl enable seafront-hardware-prep.service
 # separate invocations: firewall-offline-cmd rejects --add-service + --add-port together.
 RUN firewall-offline-cmd --add-service=ssh && firewall-offline-cmd --add-port=8000/tcp
 

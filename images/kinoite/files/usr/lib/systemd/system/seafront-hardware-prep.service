@@ -1,0 +1,41 @@
+# Boot-time hardware-passthrough fixup for the seafront container.
+#
+# Fixes two things the quadlet cannot do on its own on an immutable Kinoite box:
+#
+# 1) CAMERAS (Daheng/Galaxy, via libusb through the /dev/bus/usb bind-mount).
+#    SELinux is enforcing; a container's raw usbfs access is denied unless the
+#    `container_use_devices` boolean is on. Without it, gxipy enumerates 0 cameras
+#    (the GenTL producer swallows the EACCES — no AVC is even logged). We set the
+#    boolean at every boot (non-persistent setsebool is idempotent and avoids the
+#    ostree/bootc `-P` persistence quirks).
+#
+# 2) MICROCONTROLLER (Teensy CDC-ACM at /dev/ttyACM0, via pyserial).
+#    The quadlet passes it with `AddDevice=-/dev/ttyACM0` (leading '-' = optional, so
+#    hardware-less/mock boxes still start). But quadlet's optional-device check runs in
+#    the systemd GENERATOR at early boot — BEFORE udev has created the ttyACM node — so
+#    it always evaluates "absent" and drops `--device` from the generated ExecStart.
+#    The device therefore never enters the container. Once udev has settled and the node
+#    exists, a `daemon-reload` re-runs the generator and the regenerated unit DOES include
+#    `--device /dev/ttyACM0`; we then restart seafront so it picks it up.
+#    (SELinux is NOT involved here: `--device` nodes are relabelled by podman and open
+#    fine even with container_use_devices off.)
+#
+# On a box with no Teensy this is a near-no-op: the boolean is set, no ttyACM exists, so
+# no reload/restart happens and seafront keeps running (e.g. the mock profile).
+[Unit]
+Description=Prepare host for seafront USB/serial passthrough (SELinux boolean + late ttyACM)
+# udev must have created the ttyACM node; seafront's initial (device-less) start must be up.
+Wants=systemd-udev-settle.service
+After=systemd-udev-settle.service seafront.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Cameras: allow the container's libusb to touch raw usbfs. '-' = don't fail the unit.
+ExecStart=-/usr/sbin/setsebool container_use_devices on
+# Teensy: if a serial node exists, regenerate the quadlet (now includes --device) and
+# restart seafront to attach it. Guarded so hardware-less boxes don't restart needlessly.
+ExecStart=/bin/sh -c 'if ls /dev/ttyACM* >/dev/null 2>&1; then systemctl daemon-reload && systemctl try-restart seafront.service; fi'
+
+[Install]
+WantedBy=multi-user.target
