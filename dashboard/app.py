@@ -830,8 +830,24 @@ HTML = """<!doctype html>
           text-transform: uppercase; }
   .flag.idle { background: #21262d; color: #8b949e; border: 1px solid #30363d; }
   .flag.rebuilding { background: #3a2d09; color: #f0c674; border: 1px solid #bb8009; }
-  .gwbtns { display: flex; gap: 8px; margin-top: 4px; }
+  .gwbtns { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
   .gwbtns button { padding: 7px 12px; }
+  .gwbtns input { font: inherit; font-size: .85rem; padding: 7px 10px; border-radius: 8px;
+                  border: 1px solid #30363d; background: #0e1116; color: #e6edf3; }
+  .hint { position: relative; display: inline-flex; align-items: center; justify-content: center;
+          width: 20px; height: 20px; flex: none; border-radius: 50%; cursor: help;
+          background: #21262d; border: 1px solid #30363d; color: #8b949e;
+          font-size: .75rem; font-weight: 700; }
+  .hint:hover, .hint:focus { color: #e6edf3; border-color: #58a6ff; outline: none; }
+  .hint-pop { position: absolute; bottom: calc(100% + 8px); left: 50%; transform: translateX(-50%);
+              width: 260px; padding: 10px 12px; z-index: 20; text-align: left;
+              background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+              color: #c9d1d9; font-size: .8rem; font-weight: 400; line-height: 1.45;
+              box-shadow: 0 6px 20px #00000066;
+              opacity: 0; visibility: hidden; transition: opacity .12s; }
+  .hint:hover .hint-pop, .hint:focus .hint-pop { opacity: 1; visibility: visible; }
+  .hint-pop code { font-family: ui-monospace, monospace; background: #0e1116;
+                   padding: 0 4px; border-radius: 4px; color: #e6edf3; }
   .repolink { color: #58a6ff; text-decoration: none; }
   .repolink:hover { text-decoration: underline; }
   .ok { color: #3fb950; }
@@ -927,7 +943,8 @@ HTML = """<!doctype html>
       <button id="wificlient" onclick="setWifi('client')">🌐 Wi-Fi: Client (internet)</button>
     </div>
     <div class="gwbtns">
-      <input id="gwref" type="text" placeholder="seafront ref — blank = pinned release; e.g. main, latest, or a commit" style="flex:1;min-width:16em">
+      <input id="gwref" type="text" placeholder="seafront ref (optional)" style="flex:1;min-width:9em">
+      <span class="hint" tabindex="0" aria-label="seafront ref help">?<span class="hint-pop">Which seafront commit to build.<br><br><b>Blank</b> = the pinned release (rebuilds both images).<br><br>Or give a commit SHA, a branch (<code>main</code>), a tag, or <code>latest</code> — builds the <b>seafront image only</b> at that ref, no gateway commit needed.</span></span>
       <button id="gwrebuild" onclick="gatewayRebuild()">Fetch git + rebuild images</button>
       <button class="danger" onclick="gatewayReboot()">Reboot gateway</button>
     </div>
