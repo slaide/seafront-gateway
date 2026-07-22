@@ -71,9 +71,17 @@ sed "s/__DASHBOARD_PORT__/$DASH_PORT/; s#/opt/seafront-gateway#$DIR#g" \
 sudo systemctl daemon-reload
 sudo systemctl enable --now microscope-dashboard
 
+echo "==> keep pharmbio's user runtime dir alive for the dashboard's rootless podman"
+# The dashboard is a system service (no login session), but its "rebuild images" action
+# runs rootless podman as pharmbio, which needs a writable /run/user/1000. enable-linger
+# makes logind create+maintain it across boots; the unit sets XDG_RUNTIME_DIR to match.
+sudo loginctl enable-linger pharmbio
+
 echo "==> dashboard sudoers (reboot + the self-elevating fleet scripts)"
 # The dashboard runs as pharmbio. Its git pull + rootless-podman image rebuilds need
-# no sudo (pharmbio owns $DIR and its own podman storage). What DOES need root:
+# no sudo (pharmbio owns $DIR and its own podman storage) — but they DO need pharmbio's
+# user runtime dir kept alive (enable-linger above + the unit's XDG_RUNTIME_DIR). What
+# else needs root:
 # rebooting the host, applying config (write /etc/caddy, restart caddy, firewalld), and
 # toggling Wi-Fi. apply-config.sh and wifi-mode.sh self-elevate; grant pharmbio those
 # two scripts (bare + with args) passwordless so the non-tty dashboard can run them —

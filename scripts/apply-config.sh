@@ -63,6 +63,9 @@ fi
 # --- Dashboard unit (only when the dashboard port may have changed) -----------
 if [ "$RESTART_DASHBOARD" = 1 ]; then
   DASH_PORT="$($FC get gateway.dashboard_port)"
+  # The dashboard's rootless-podman rebuilds need pharmbio's user runtime dir to persist
+  # without a login session (see the unit's XDG_RUNTIME_DIR). Idempotent.
+  loginctl enable-linger pharmbio 2>/dev/null || true
   sed "s/__DASHBOARD_PORT__/$DASH_PORT/; s#/opt/seafront-gateway#$DIR#g" \
     "$DIR/systemd/microscope-dashboard.service" \
     > /etc/systemd/system/microscope-dashboard.service

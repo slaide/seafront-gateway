@@ -7,6 +7,12 @@ Wants=network-online.target
 Type=simple
 User=pharmbio
 WorkingDirectory=/opt/seafront-gateway/dashboard
+# The "rebuild images" action runs rootless podman as pharmbio. A system service has no
+# login session, so podman has no writable runtime dir and dies with "RunRoot ... not
+# writable" / 'default OCI runtime "crun" not found'. Point it at pharmbio's user runtime
+# dir, kept alive across boots by `loginctl enable-linger pharmbio` (done in
+# apply-config.sh + gateway-setup.sh). uid 1000 = pharmbio, the fleet's first/only user.
+Environment=XDG_RUNTIME_DIR=/run/user/1000
 # The checkout MUST live outside any home directory. SELinux (enforcing on Kinoite)
 # labels everything under /home (== /var/home) 'user_home_t', and a systemd service's
 # confined domain is forbidden from exec'ing user_home_t files -> the venv's uvicorn
