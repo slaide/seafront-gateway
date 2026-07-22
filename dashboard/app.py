@@ -661,6 +661,29 @@ async def gateway_job() -> JSONResponse:
     return JSONResponse(_job_status(GW_JOB))
 
 
+@app.post("/api/gateway/self-update")
+async def gateway_self_update() -> JSONResponse:
+    """Update the gateway's own software: git pull the checkout + apply it (regenerate the
+    dashboard unit, reload Caddy/firewall, restart the dashboard). NOT an image rebuild.
+
+    Runs detached in a transient unit (self-update.sh) because applying restarts THIS
+    dashboard, so this returns immediately and the client should poll until the dashboard
+    is back, then reload. Needs internet (git pull)."""
+    if not await _internet_ok():
+        raise HTTPException(409, "gateway has no internet (Wi-Fi in hotspot/AP mode?). "
+                                 "Switch Wi-Fi to client mode, then update.")
+    proc = await asyncio.create_subprocess_exec(
+        "sudo", "-n", f"{ROOT}/scripts/self-update.sh",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=15.0)
+    except asyncio.TimeoutError:
+        return JSONResponse({"ok": True, "note": "update started; dashboard restarting"})
+    if proc.returncode:
+        raise HTTPException(500, f"self-update failed to start: {out.decode()[-500:]}")
+    return JSONResponse({"ok": True, "note": "update started; dashboard restarting"})
+
+
 @app.post("/api/gateway/reboot")
 async def gateway_reboot() -> JSONResponse:
     # Reboots THIS host; the reply may not flush as the system goes down, so a
@@ -946,6 +969,10 @@ HTML = """<!doctype html>
       <input id="gwref" type="text" placeholder="seafront ref (optional)" style="flex:1;min-width:9em">
       <span class="hint" tabindex="0" aria-label="seafront ref help">?<span class="hint-pop">Which seafront commit to build.<br><br><b>Blank</b> = the pinned release (rebuilds both images).<br><br>Or give a commit SHA, a branch (<code>main</code>), a tag, or <code>latest</code> — builds the <b>seafront image only</b> at that ref, no gateway commit needed.</span></span>
       <button id="gwrebuild" onclick="gatewayRebuild()">Fetch git + rebuild images</button>
+    </div>
+    <div class="gwbtns">
+      <button id="gwselfupdate" onclick="gatewaySelfUpdate()">Update gateway</button>
+      <span class="hint" tabindex="0" aria-label="update gateway help">?<span class="hint-pop">Updates the gateway's own software: <code>git pull</code> the gateway repo and apply it (dashboard, Caddy, scripts). Restarts the dashboard; the page reloads when it is back. <b>Not</b> an image rebuild.</span></span>
       <button class="danger" onclick="gatewayReboot()">Reboot gateway</button>
     </div>
   </div>
@@ -1333,6 +1360,30 @@ async function pollGatewayJob() {
     if (j.running) { setTimeout(pollGatewayJob, 1500); }
     else { box.textContent += `\\n\\n--- finished (exit ${j.rc}) ---`; box.scrollTop = box.scrollHeight; fetchGateway(); fetchImages(); }
   } catch (e) { box.textContent += '\\npoll error: ' + e; }
+}
+async function gatewaySelfUpdate() {
+  if (!confirm('Update the gateway itself — git pull + apply (restarts the dashboard)?\\n\\nNot an image rebuild. The page reloads once the dashboard is back.')) return;
+  openModal('Gateway — update software');
+  const box = document.getElementById('modalbody');
+  box.textContent = 'pulling + applying… the dashboard will restart.';
+  let r;
+  try { r = await fetch('/api/gateway/self-update', {method: 'POST'}); }
+  catch (e) { box.textContent = 'request failed: ' + e; return; }
+  if (!r.ok) {
+    const j = await r.json().catch(() => ({}));
+    box.textContent = 'error: ' + (j.detail || r.status);
+    return;
+  }
+  box.textContent = 'dashboard restarting — reloading when it is back…';
+  setTimeout(waitForDashboardThenReload, 3000);
+}
+async function waitForDashboardThenReload() {
+  for (let i = 0; i < 30; i++) {
+    try { const r = await fetch('/api/gateway', {cache: 'no-store'}); if (r.ok) { location.reload(); return; } }
+    catch (e) { /* dashboard still down */ }
+    await new Promise(res => setTimeout(res, 1500));
+  }
+  location.reload();
 }
 async function gatewayReboot() {
   if (!confirm('Reboot the GATEWAY (' + (document.getElementById('gwhost').textContent) + ')?\\n\\nDrops the whole control plane (dashboard, registry, proxy) for ~1 min. Boxes keep running locally.')) return;
