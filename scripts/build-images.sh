@@ -6,14 +6,28 @@
 #   build-images.sh                    # both images
 #   build-images.sh --seafront         # app only (the frequent one)
 #   build-images.sh --os               # OS only (rare)
-#   SEAFRONT_REF=<sha|tag> build-images.sh --seafront
+#   SEAFRONT_REF=<sha|branch|tag|latest> build-images.sh --seafront   # test any ref
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REG="${REGISTRY:-10.10.0.69:5000}"
-# Pinned seafront commit (source of truth). A gateway commit + this SHA + seafront's
-# committed uv.lock fully determine the app image. Bump this to roll the app forward;
-# override with SEAFRONT_REF=<sha|tag> only for one-off testing.
-REF="${SEAFRONT_REF:-dba35b3773dea851939f8964a30b9aa37ec3cd9d}"
+SEAFRONT_REPO="${SEAFRONT_REPO:-https://github.com/slaide/seafront.git}"
+# Pinned seafront commit (source of truth) — the reproducible-release default: a gateway
+# commit + this SHA + seafront's committed uv.lock fully determine the app image. Keep it
+# on a hardware-verified commit; bump it to roll the fleet forward. For testing, override
+# SEAFRONT_REF=<sha|branch|tag|latest> (the dashboard exposes a field) — no gateway commit.
+REF="${SEAFRONT_REF:-e13a34fe7e6cceface687a14523268f1276b011b}"
+
+# Resolve a symbolic ref (branch / tag / "latest" / "HEAD") to a concrete commit SHA; a
+# SHA (full or abbreviated) is used as-is. This keeps the build reproducible AND makes the
+# podman git-checkout layer cache-bust correctly — a bare branch name as the build-arg
+# keeps the same value as the branch advances, so podman would reuse the stale checkout.
+if ! printf '%s' "$REF" | grep -qiE '^[0-9a-f]{7,40}$'; then
+    case "$REF" in latest|LATEST|HEAD|"") LOOKUP=HEAD ;; *) LOOKUP="$REF" ;; esac
+    RESOLVED="$(git ls-remote "$SEAFRONT_REPO" "$LOOKUP" | awk 'NR==1{print $1}')"
+    [ -n "$RESOLVED" ] || { echo "error: cannot resolve SEAFRONT_REF='$REF' at $SEAFRONT_REPO" >&2; exit 1; }
+    echo "==> resolved SEAFRONT_REF='$REF' -> $RESOLVED"
+    REF="$RESOLVED"
+fi
 
 DO_APP=0; DO_OS=0
 [ $# -eq 0 ] && { DO_APP=1; DO_OS=1; }
@@ -26,6 +40,7 @@ esac; done
 if [ "$DO_APP" = 1 ]; then
     echo "==> build seafront:$REF"
     podman build --pull -t "$REG/seafront:stable" \
+        --build-arg SEAFRONT_REPO="$SEAFRONT_REPO" \
         --build-arg SEAFRONT_REF="$REF" "$DIR/images/seafront"
     podman push --tls-verify=false "$REG/seafront:stable"
 fi

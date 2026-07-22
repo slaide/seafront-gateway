@@ -631,17 +631,28 @@ async def gateway_info() -> JSONResponse:
 
 
 @app.post("/api/gateway/update")
-async def gateway_update() -> JSONResponse:
-    """Fetch latest git + rebuild BOTH images into the registry. Streamed job;
-    updates the registry only — no box is touched until it is rolled."""
+async def gateway_update(seafront_ref: str = "") -> JSONResponse:
+    """Fetch latest git + rebuild images into the registry. Streamed job; updates the
+    registry only — no box is touched until it is rolled.
+
+    seafront_ref (optional): build the seafront app image at this ref — a commit, branch,
+    tag, or "latest" — instead of the pinned default, and skip the (slow) OS rebuild. Lets
+    you test a seafront build without bumping+committing the pin. Blank = the pinned commit
+    + both images (the reproducible release path)."""
     # Rebuilding pulls from the internet. If the gateway's single Wi-Fi radio is in
     # AP/hotspot mode it has no upstream, so fail fast with the fix instead of hanging.
     if not await _internet_ok():
         raise HTTPException(409, "gateway has no internet (Wi-Fi in hotspot/AP mode?). "
                                  "Switch Wi-Fi to client mode, then rebuild.")
+    ref = seafront_ref.strip()
+    if ref:
+        # testing a specific seafront build: seafront image only, at the given ref
+        build = f"SEAFRONT_REF={shlex.quote(ref)} bash scripts/build-images.sh --seafront"
+    else:
+        # reproducible release: pinned commit, both images
+        build = "bash scripts/build-images.sh --os --seafront"
     cmd = ["bash", "-lc",
-           f"cd {ROOT} && git fetch --all --prune && git pull --ff-only && "
-           "bash scripts/build-images.sh --os --seafront"]
+           f"cd {ROOT} && git fetch --all --prune && git pull --ff-only && {build}"]
     return _start_job(GW_JOB, "gateway-update", cmd)
 
 
@@ -916,6 +927,7 @@ HTML = """<!doctype html>
       <button id="wificlient" onclick="setWifi('client')">🌐 Wi-Fi: Client (internet)</button>
     </div>
     <div class="gwbtns">
+      <input id="gwref" type="text" placeholder="seafront ref — blank = pinned release; e.g. main, latest, or a commit" style="flex:1;min-width:16em">
       <button id="gwrebuild" onclick="gatewayRebuild()">Fetch git + rebuild images</button>
       <button class="danger" onclick="gatewayReboot()">Reboot gateway</button>
     </div>
@@ -1277,10 +1289,15 @@ function changeIp(name) {
     'Renumber ' + name + ' to ' + ip + '?\\n\\nApplies the new IP over SSH (keeps the old address until the new one is confirmed, auto-reverts on failure), then re-points the proxy. Runs in the background (~30s).'});
 }
 async function gatewayRebuild() {
-  if (!confirm('Fetch latest git + rebuild BOTH images on the gateway?\\n\\nUpdates the registry only — no box is touched. Takes several minutes.')) return;
-  openModal('Gateway — fetch git + rebuild images');
+  const ref = (document.getElementById('gwref').value || '').trim();
+  const msg = ref
+    ? `Rebuild the seafront image at "${ref}" and push to the registry?\\n\\n(seafront only — OS image skipped. No box is touched.)`
+    : 'Fetch latest git + rebuild BOTH images on the gateway?\\n\\nUpdates the registry only — no box is touched. Takes several minutes.';
+  if (!confirm(msg)) return;
+  openModal(ref ? ('Gateway — rebuild seafront @ ' + ref) : 'Gateway — fetch git + rebuild images');
   let r;
-  try { r = await fetch('/api/gateway/update', {method: 'POST'}); }
+  const url = '/api/gateway/update' + (ref ? ('?seafront_ref=' + encodeURIComponent(ref)) : '');
+  try { r = await fetch(url, {method: 'POST'}); }
   catch (e) { document.getElementById('modalbody').textContent = 'request failed: ' + e; return; }
   if (!r.ok) {
     const j = await r.json().catch(() => ({}));
