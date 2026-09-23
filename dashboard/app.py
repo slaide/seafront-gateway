@@ -141,6 +141,7 @@ async def _check(client: httpx.AsyncClient, m: dict) -> dict:
         "name": m["name"],
         "host": m["host"],
         "proxy_port": m["proxy_port"],
+        "seafront_port": m["seafront_port"],
         "host_up": host_up,
         "service_up": service_up,
     }
@@ -1463,7 +1464,7 @@ async function refresh() {
         <div class="sig"><span class="dot ${hs}"></span>Computer: ${m.host_up ? 'online' : 'offline'}</div>
         <div class="sig"><span class="dot ${ss}"></span>seafront: ${m.service_up ? 'running' : 'down'}</div>
       </div>
-      <div class="meta">${m.host}:${m.proxy_port}</div>
+      <div class="meta">${m.host}:${m.seafront_port} · via gateway :${m.proxy_port}</div>
       <div class="ver">${osLine(osd, IMAGES.registry.os)}</div>
       <div class="ver">${appLine(appd, IMAGES.registry.seafront)}</div>
       ${img.stale_seconds ? `<div class="ver stale">⏳ last read failed — showing values from ${img.stale_seconds}s ago</div>` : ''}
