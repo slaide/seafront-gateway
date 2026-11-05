@@ -2,19 +2,18 @@
 #
 # Fixes what the quadlet cannot do on its own on an immutable Kinoite box:
 #
-# 1) CAMERAS (Daheng/Galaxy, via libusb through the /dev/bus/usb bind-mount).
+# CAMERAS (Daheng/Galaxy, via libusb through /dev/bus/usb in the /dev bind-mount).
 #    SELinux is enforcing; a container's raw usbfs access is denied unless the
 #    `container_use_devices` boolean is on. Without it, gxipy enumerates 0 cameras
 #    (the GenTL producer swallows the EACCES — no AVC is even logged). We set the
 #    boolean at every boot (non-persistent setsebool is idempotent and avoids the
 #    ostree/bootc `-P` persistence quirks).
 #
-# 2) MICROCONTROLLER (Teensy CDC-ACM) is NOT handled here any more: a boot-only check
-#    missed a Teensy that enumerated late or was plugged in/replugged after boot. udev now
-#    starts seafront-serial-attach.service on every ttyACM add (see that unit).
+# The same boolean covers the Teensy serial nodes: the quadlet binds the host /dev, so
+# /dev/ttyACM* keep their host labels inside the container.
 #
 [Unit]
-Description=Prepare host for seafront USB passthrough (SELinux boolean for cameras)
+Description=Prepare host for seafront USB/serial passthrough (SELinux boolean)
 Before=seafront.service
 
 [Service]

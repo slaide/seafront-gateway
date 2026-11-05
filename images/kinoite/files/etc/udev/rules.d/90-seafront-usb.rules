@@ -10,7 +10,3 @@
 
 # Teensy microcontroller (PJRC, vendor 16c0): serial node + a stable symlink.
 SUBSYSTEM=="tty", ATTRS{idVendor}=="16c0", MODE="0666", SYMLINK+="teensy"
-# Every time a ttyACM node appears (boot coldplug, late enumeration, replug), regenerate the
-# seafront quadlet so its optional AddDevice=-/dev/ttyACM* lines resolve, and restart seafront
-# to attach it. See seafront-serial-attach.service.
-SUBSYSTEM=="tty", KERNEL=="ttyACM*", ACTION=="add", TAG+="systemd", ENV{SYSTEMD_WANTS}+="seafront-serial-attach.service"

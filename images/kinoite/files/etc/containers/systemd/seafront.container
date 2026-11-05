@@ -17,34 +17,25 @@ Environment=SEAFRONT_HOME=/root/seafront
 Environment=SEAFRONT_MICROSCOPE=mocroscope
 
 # ---------------------------------------------------------------------------
-# USB PASSTHROUGH — validated on squid1 (2026-07-20). Two host-side prerequisites
-# are handled by units baked in the OS image, NOT here:
-#   - cameras need the SELinux `container_use_devices` boolean (raw usbfs/libusb),
-#     set by seafront-hardware-prep.service;
-#   - the Teensy `--device` is only present if its node existed when this quadlet was
-#     generated (see below); seafront-serial-attach.service (udev) fixes that up.
-# Robust-to-hotplug pattern: mount the whole usb tree + allow the device-cgroup
-# classes, rather than binding a single node that vanishes on replug.
-#   189 = usb (libusb cameras), 166 = ttyACM (Teensy CDC-ACM serial)
+# USB + SERIAL PASSTHROUGH. Bind the host's whole /dev and let the device-cgroup rules
+# decide what may actually be opened:
+#   189 = usb (libusb cameras via /dev/bus/usb), 166 = ttyACM (Teensy CDC-ACM serial)
+# /dev is devtmpfs, so nodes that appear or vanish after start (Teensy reset/replug, which
+# can also renumber ttyACM0 <-> ttyACM1) show up live in the container. pyserial finds the
+# Teensy by globbing /dev/ttyACM*, so it needs those nodes present, not only /dev/bus/usb.
+#
+# Do NOT go back to AddDevice=-/dev/ttyACMn: quadlet resolves the optional '-' only when
+# the unit is generated (boot / daemon-reload). A node absent then is never passed in; a
+# node present then but gone at the next start (renumbered) makes podman refuse to start
+# ("stat /dev/ttyACM1: no such file or directory").
+#
+# SELinux: host device nodes keep their labels; seafront-hardware-prep.service sets the
+# `container_use_devices` boolean before seafront starts, which lets the container open them.
 # ---------------------------------------------------------------------------
-Volume=/dev/bus/usb:/dev/bus/usb
+Volume=/dev:/dev
 # NOTE the quotes: each cgroup-rule value contains spaces, and quadlet splits
 # PodmanArgs on whitespace — unquoted, the unit parses into garbage.
 PodmanArgs=--device-cgroup-rule='c 189:* rmw' --device-cgroup-rule='c 166:* rmw'
-# The Teensy microcontroller is a USB CDC-ACM serial device; seafront finds/controls it
-# via pyserial, which needs the /dev/ttyACM* NODE inside the container (the /dev/bus/usb
-# mount above only gives raw libusb access, not the serial node). Pass it through. The
-# leading '-' makes each optional, so a box with no Teensy — e.g. running the mock profile
-# — still starts. The cgroup rule above already grants access to char-major-166 (ttyACM).
-#
-# GOTCHA (why seafront-serial-attach.service exists): quadlet's optional-device '-' check
-# runs in the systemd GENERATOR (boot / daemon-reload only). A node that appears later (late
-# enumeration, plug-in after boot, replug) is "absent" there, so --device is dropped and
-# pyserial in the container sees no port while the cameras still work. udev starts the attach
-# unit on every ttyACM add; it daemon-reloads (regenerating this unit WITH --device) and
-# restarts seafront. SELinux is NOT involved for --device nodes (podman relabels them).
-AddDevice=-/dev/ttyACM0
-AddDevice=-/dev/ttyACM1
 
 [Service]
 Restart=always

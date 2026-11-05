@@ -20,21 +20,17 @@ set -euo pipefail
 
 IMAGE="${SEAFRONT_IMAGE:-10.10.0.69:5000/seafront:stable}"
 
-# Match the seafront quadlet's device access: the whole USB tree + cgroup rules for
+# Match the seafront quadlet's device access: the host /dev (cameras via /dev/bus/usb,
+# Teensy via /dev/ttyACM*, both live across replug) + cgroup rules for
 # usb (major 189, libusb cameras) and ttyACM (166, Teensy serial). label=disable
 # because Kinoite runs SELinux enforcing and would otherwise deny raw device access.
 run=(podman run --rm
-     -v /dev/bus/usb:/dev/bus/usb
+     -v /dev:/dev
      --device-cgroup-rule='c 189:* rmw'
      --device-cgroup-rule='c 166:* rmw'
      --security-opt label=disable
      -v /home/pharmbio/seafront:/root/seafront
      --env SEAFRONT_HOME=/root/seafront)
-
-# The Teensy is a CDC-ACM serial device. pyserial's port discovery globs /dev/ttyACM* inside
-# the container, so the /dev/bus/usb mount (enough for the libusb cameras) does not make it
-# visible: each node has to be passed with --device. Whatever is plugged in right now.
-for d in /dev/ttyACM*; do [ -e "$d" ] && run+=(--device "$d"); done
 
 # allocate a TTY only when we actually have one (so piped/non-interactive use works)
 if [ -t 0 ]; then run+=(-it); fi
