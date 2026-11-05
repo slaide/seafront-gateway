@@ -174,11 +174,30 @@ def _ssh_base(name: str) -> list[str]:
         "-o", "ControlMaster=auto",
         "-o", f"ControlPath={CONTROL_PATH}",
         "-o", "ControlPersist=60",
+        # A reboot can kill the box end of the shared connection without a clean close; the
+        # master then sits on a dead TCP link and every multiplexed read hangs until our
+        # timeout, so the dashboard keeps serving pre-reboot values. Keepalives make the
+        # master notice within ~10s and exit, so the next read opens a fresh connection.
+        "-o", "ServerAliveInterval=5",
+        "-o", "ServerAliveCountMax=2",
         # No KDC/DNS on the isolated backbone, so GSSAPI only adds a per-connection
         # name-lookup cost and buys nothing (we authenticate by key).
         "-o", "GSSAPIAuthentication=no",
         f"{SSH_USER}@{m['host']}", "--",
     ]
+
+
+async def _close_ssh_master(name: str) -> None:
+    """Best-effort `ssh -O exit` on the box's multiplexed master connection."""
+    base = _ssh_base(name)
+    target = base[base.index("--") - 1]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ssh", "-o", f"ControlPath={CONTROL_PATH}", "-O", "exit", target,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        await asyncio.wait_for(proc.wait(), timeout=5.0)
+    except Exception:
+        pass
 
 
 async def _ssh(name: str, argv: list[str], timeout: float = 20.0,
@@ -409,6 +428,11 @@ async def reboot(name: str) -> JSONResponse:
     if rc != 0 and any(s in msg for s in
                        ("sudo:", "a password is required", "a terminal is required", "not allowed")):
         raise HTTPException(502, f"reboot not permitted: {msg}")
+    # The box is going away: drop its pre-reboot image read (else a failed read during the
+    # reboot serves it as "staged — reboot to apply") and close the shared SSH connection so
+    # the first read after boot starts fresh instead of reusing a dead one.
+    _LAST_BOX_IMAGES.pop(name, None)
+    await _close_ssh_master(name)
     return JSONResponse({"ok": True, "action": "reboot", "note": msg})
 
 
@@ -1490,10 +1514,23 @@ async function applyMic() {
   } catch (e) { err.textContent = 'request failed: ' + e; btn.disabled = false; }
 }
 
+// Last seen host_up per box. When a box comes back (reboot finished), re-read its image
+// versions right away instead of waiting for the 30s poll, which otherwise leaves the
+// pre-reboot "staged — reboot to apply" on screen. Two reads: sshd answers before bootc
+// and podman are fully settled.
+const HOST_UP = {};
+function boxCameBack(name) {
+  setTimeout(fetchImages, 3000);
+  setTimeout(fetchImages, 15000);
+}
 async function refresh() {
   let data;
   try { data = await (await fetch('/api/status')).json(); }
   catch (e) { document.getElementById('foot').textContent = 'gateway unreachable'; return; }
+  for (const m of data) {
+    if (HOST_UP[m.name] === false && m.host_up) boxCameBack(m.name);
+    HOST_UP[m.name] = m.host_up;
+  }
   const grid = document.getElementById('grid');
   grid.innerHTML = '';
   for (const m of data) {
