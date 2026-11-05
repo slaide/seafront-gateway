@@ -24,7 +24,7 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FC="python3 $DIR/scripts/fleet_config.py"
 HOTSPOT_CON="fleet-hotspot"
 SWITCH_UNIT="fleet-wifi-switch"
-VERIFY_WAIT="${WIFI_VERIFY_WAIT:-20}"   # seconds to let the new mode settle before verifying
+VERIFY_WAIT="${WIFI_VERIFY_WAIT:-60}"   # max seconds for the new mode to verify (polled every 3s)
 
 # The Wi-Fi radio. An explicit gateway.wifi.iface in the config wins (for a gateway with
 # more than one radio); otherwise auto-detect the first wireless netdev. Avoids baking in
@@ -130,22 +130,55 @@ apply_client() {
     return
   fi
 
-  # Explicit SSID: drive it through a connection PROFILE + `con up`. `con up` scans and
-  # associates as part of activation, so — unlike `device wifi connect` — it does NOT need
-  # the SSID to already be in the scan list, which is exactly what fails right after the
-  # radio leaves AP mode. Reuse a saved profile (matched by name == SSID, how NM names
-  # them) or create one; only set a PSK when a password was supplied.
-  if nmcli -t -f NAME,TYPE con show | awk -F: '$2=="802-11-wireless"{print $1}' | grep -Fxq "$ss"; then
-    [ -n "$pw" ] && nmcli con modify "$ss" wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$pw"
-  elif [ -n "$pw" ]; then
-    nmcli con add type wifi ifname "$ifc" con-name "$ss" ssid "$ss" \
-      wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$pw"
-  else
+  # Explicit SSID. Right after leaving AP mode the radio's scan list is empty or stale, so
+  # rescan until the SSID shows up (up to ~30s), then read its SECURITY from the scan.
+  local i seen=0 sec="" km=""
+  for i in $(seq 1 10); do
+    nmcli device wifi rescan ifname "$ifc" ssid "$ss" 2>/dev/null || true
+    sleep 3
+    sec="$(nmcli -t -f SSID,SECURITY device wifi list ifname "$ifc" 2>/dev/null \
+            | awk -F: -v s="$ss" '$1==s{print $2; exit}')"
+    if nmcli -t -f SSID device wifi list ifname "$ifc" 2>/dev/null | grep -Fxq "$ss"; then
+      seen=1; echo "==> '$ss' visible after $((i * 3))s (security: ${sec:-open})"; break
+    fi
+  done
+
+  # The profile's key-mgmt MUST match what the AP offers: NM silently treats an AP whose
+  # security doesn't fit the profile as absent and fails with "No network with SSID found"
+  # even though `device wifi list` shows it. Phone hotspots are often WPA3-only (SAE), so a
+  # hardcoded wpa-psk breaks there. WPA2 (incl. WPA2/WPA3 transition) -> wpa-psk;
+  # WPA3-only -> sae; open -> no security section.
+  case "$sec" in
+    *WPA2*|*WPA1*) km=wpa-psk ;;
+    *WPA3*)        km=sae ;;
+    ""|--)         km="" ;;
+  esac
+  if [ "$seen" = 0 ]; then
+    echo "!! '$ss' not in scan results after 30s. Visible networks:" >&2
+    nmcli -t -f SSID,SECURITY,CHAN,FREQ,SIGNAL device wifi list ifname "$ifc" 2>/dev/null | sed 's/^/   /' >&2
+    echo "   regulatory domain: $(iw reg get 2>/dev/null | awk '/^country/{print $2; exit}')" >&2
+    km="$([ -n "$pw" ] && echo wpa-psk)"   # unknown; best guess
+  fi
+
+  # Reuse a saved profile (matched by name == SSID, how NM names them) or create one.
+  if ! nmcli -t -f NAME,TYPE con show | awk -F: '$2=="802-11-wireless"{print $1}' | grep -Fxq "$ss"; then
     nmcli con add type wifi ifname "$ifc" con-name "$ss" ssid "$ss"
   fi
+  if [ -n "$km" ]; then
+    nmcli con modify "$ss" wifi-sec.key-mgmt "$km"
+    # psk-flags 0 = stored system-wide in the profile. A profile first made from a desktop
+    # session is often agent-owned (flags 1), which a root/headless activation cannot read.
+    [ -n "$pw" ] && nmcli con modify "$ss" wifi-sec.psk-flags 0 wifi-sec.psk "$pw"
+  elif [ "$seen" = 1 ]; then
+    nmcli con modify "$ss" remove 802-11-wireless-security 2>/dev/null || true
+  fi
+  # Not seen: directed probe (hidden=yes) finds an SSID the passive scan missed.
+  [ "$seen" = 0 ] && { echo "==> trying directed probe (hidden=yes)" >&2; nmcli con modify "$ss" 802-11-wireless.hidden yes || true; }
+
   # Only the joined network auto-rejoins; the hotspot and every other saved profile are
   # turned off, so the last explicit mode is exactly what the radio does next / at boot.
   _set_exclusive_autoconnect "$ss"
+  echo "==> connecting to '$ss' (key-mgmt: ${km:-none})"
   nmcli --wait 30 con up "$ss"
 }
 
@@ -168,12 +201,22 @@ do_apply() {
   # `|| true`: a failed switch (e.g. bad password, network out of range) must NOT abort the
   # worker under `set -e` — it has to fall through to verify + revert so we never strand it.
   if [ "$target" = ap ]; then apply_ap || true; else apply_client "$ss" "$pw" || true; fi
-  echo "==> waiting ${VERIFY_WAIT}s for $target to settle…"
-  sleep "$VERIFY_WAIT"
-  if verify_mode "$target"; then
-    echo "==> Wi-Fi is now in $target mode"
+  echo "==> waiting up to ${VERIFY_WAIT}s for $target to verify…"
+  local waited=0 ok=0
+  while [ "$waited" -lt "$VERIFY_WAIT" ]; do
+    if verify_mode "$target"; then ok=1; break; fi
+    sleep 3; waited=$((waited + 3))
+  done
+  if [ "$ok" = 1 ]; then
+    echo "==> Wi-Fi is now in $target mode (after ${waited}s)"
   else
-    echo "!! $target did not come up; reverting to $prev" >&2
+    # Say WHY before reverting, so `journalctl -u fleet-wifi-switch` explains the flip back.
+    echo "!! $target did not verify within ${VERIFY_WAIT}s:" >&2
+    echo "   mode=$(current_mode) con='$(active_wifi_con)'" \
+         "connectivity=$(nmcli -t -f CONNECTIVITY general status 2>/dev/null || echo ?)" \
+         "ipv4=$(nmcli -g IP4.ADDRESS device show "$(iface)" 2>/dev/null | paste -sd' ')" >&2
+    echo "   (client mode requires NetworkManager connectivity 'full' or 'portal')" >&2
+    echo "!! reverting to $prev" >&2
     if [ "$prev" = ap ]; then apply_ap || true; else apply_client || true; fi
   fi
 }
