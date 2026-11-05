@@ -31,6 +31,11 @@ run=(podman run --rm
      -v /home/pharmbio/seafront:/root/seafront
      --env SEAFRONT_HOME=/root/seafront)
 
+# The Teensy is a CDC-ACM serial device. pyserial's port discovery globs /dev/ttyACM* inside
+# the container, so the /dev/bus/usb mount (enough for the libusb cameras) does not make it
+# visible: each node has to be passed with --device. Whatever is plugged in right now.
+for d in /dev/ttyACM*; do [ -e "$d" ] && run+=(--device "$d"); done
+
 # allocate a TTY only when we actually have one (so piped/non-interactive use works)
 if [ -t 0 ]; then run+=(-it); fi
 

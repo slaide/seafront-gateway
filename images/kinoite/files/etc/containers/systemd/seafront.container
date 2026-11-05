@@ -18,10 +18,11 @@ Environment=SEAFRONT_MICROSCOPE=mocroscope
 
 # ---------------------------------------------------------------------------
 # USB PASSTHROUGH — validated on squid1 (2026-07-20). Two host-side prerequisites
-# are handled by seafront-hardware-prep.service (baked in the OS image), NOT here:
-#   - cameras need the SELinux `container_use_devices` boolean (raw usbfs/libusb);
-#   - the Teensy `--device` is dropped by this quadlet at boot (see below) and
-#     re-attached by that unit after udev settles.
+# are handled by units baked in the OS image, NOT here:
+#   - cameras need the SELinux `container_use_devices` boolean (raw usbfs/libusb),
+#     set by seafront-hardware-prep.service;
+#   - the Teensy `--device` is only present if its node existed when this quadlet was
+#     generated (see below); seafront-serial-attach.service (udev) fixes that up.
 # Robust-to-hotplug pattern: mount the whole usb tree + allow the device-cgroup
 # classes, rather than binding a single node that vanishes on replug.
 #   189 = usb (libusb cameras), 166 = ttyACM (Teensy CDC-ACM serial)
@@ -36,11 +37,12 @@ PodmanArgs=--device-cgroup-rule='c 189:* rmw' --device-cgroup-rule='c 166:* rmw'
 # leading '-' makes each optional, so a box with no Teensy — e.g. running the mock profile
 # — still starts. The cgroup rule above already grants access to char-major-166 (ttyACM).
 #
-# GOTCHA (why seafront-hardware-prep.service exists): quadlet's optional-device '-' check
-# runs in the systemd GENERATOR at early boot, before udev creates /dev/ttyACM0, so it
-# evaluates "absent" and drops --device every boot. The prep unit daemon-reloads after
-# udev settles (regenerating this unit WITH --device) and restarts seafront. SELinux is
-# NOT involved for --device nodes (podman relabels them; they open fine with the boolean off).
+# GOTCHA (why seafront-serial-attach.service exists): quadlet's optional-device '-' check
+# runs in the systemd GENERATOR (boot / daemon-reload only). A node that appears later (late
+# enumeration, plug-in after boot, replug) is "absent" there, so --device is dropped and
+# pyserial in the container sees no port while the cameras still work. udev starts the attach
+# unit on every ttyACM add; it daemon-reloads (regenerating this unit WITH --device) and
+# restarts seafront. SELinux is NOT involved for --device nodes (podman relabels them).
 AddDevice=-/dev/ttyACM0
 AddDevice=-/dev/ttyACM1
 
