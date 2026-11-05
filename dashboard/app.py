@@ -29,6 +29,7 @@ generator), so there is one source of truth.
 """
 import asyncio
 import copy
+import hashlib
 import ipaddress
 import json
 import os
@@ -420,14 +421,20 @@ async def get_config(name: str) -> str:
 
 
 @app.post("/api/scope/{name}/config")
-async def set_config(name: str, request: Request) -> JSONResponse:
-    """Replace a box's ~/seafront/config.json and restart seafront. The body is validated as
-    JSON, written atomically (config.json is root-owned by the container, but its dir is
-    pharmbio-owned, so temp-file + mv works), and the box is restarted. If seafront does not
-    come back up on it within ~15s, the PREVIOUS config is restored automatically — a bad
-    config can't leave the box crash-looping. On success the gateway's central store
-    (configs/<name>/config.json) is updated so push-config / reflash keep the change."""
-    scope_or_404(name)
+async def set_config(name: str, request: Request, restart: bool = False) -> JSONResponse:
+    """Replace a box's ~/seafront/config.json, optionally restarting seafront (?restart=1).
+
+    The body is validated as JSON and written atomically (config.json is root-owned by the
+    container, but its dir is pharmbio-owned, so temp-file + mv works). The box then reports
+    the sha256 of the file it now has, which must match what we sent, so a save that did not
+    land is an error, never a silent success. The gateway's central store
+    (configs/<name>/config.json) is updated too, so push-config / reflash keep the change.
+
+    There is no auto-revert. A config that seafront rejects (placeholder device IDs, hardware
+    not attached yet) is a normal state for a box being set up. With ?restart=1 we wait for
+    seafront to serve; if it doesn't, the journal from THIS restart is returned so the reason
+    is visible."""
+    m = scope_or_404(name)
     raw = (await request.body()).decode("utf-8", "replace")
     try:
         cfg = json.loads(raw)
@@ -436,29 +443,62 @@ async def set_config(name: str, request: Request) -> JSONResponse:
     if not isinstance(cfg, dict) or not isinstance(cfg.get("microscopes"), list):
         raise HTTPException(400, "config must be a JSON object with a 'microscopes' array")
     text = json.dumps(cfg, indent=4) + "\n"
+    want = hashlib.sha256(text.encode()).hexdigest()
 
-    # Keep the current config in memory so we can restore it if the new one won't boot.
-    _rc, prev, _err = await _ssh(name, ["cat ~/seafront/config.json 2>/dev/null || true"], timeout=20.0)
-
+    # One round-trip: write, then report what is on disk now plus the profile override and
+    # the box clock (the latter bounds the journal query if the restart fails).
     push = ("cat > ~/seafront/config.json.new"
             " && mv -f ~/seafront/config.json.new ~/seafront/config.json"
-            " && sudo -n /usr/bin/systemctl restart seafront && echo PUSH_OK")
-    rc, out, err = await _ssh(name, [push], input=text, timeout=120.0)
-    if "PUSH_OK" not in out:
+            " && echo \"SHA=$(sha256sum < ~/seafront/config.json | cut -d' ' -f1)\""
+            " && echo \"ACTIVE=$(cat ~/seafront/active_microscope 2>/dev/null)\""
+            " && echo \"NOW=$(date +%s)\"")
+    rc, out, err = await _ssh(name, [push], input=text, timeout=60.0)
+    kv = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+    if rc != 0 or "SHA" not in kv:
         raise HTTPException(502, f"could not write config: {(err or out).strip()}")
+    if kv["SHA"] != want:
+        raise HTTPException(502, f"config on {name} does not match what was sent "
+                                 f"(box sha256 {kv['SHA'][:12]}, sent {want[:12]})")
 
-    if await _wait_service_up(name, timeout=15.0):
-        central = ROOT / "configs" / name / "config.json"
-        central.parent.mkdir(parents=True, exist_ok=True)
-        central.write_text(text)
-        return JSONResponse({"ok": True, "verified": True})
+    central = ROOT / "configs" / name / "config.json"
+    central.parent.mkdir(parents=True, exist_ok=True)
+    central.write_text(text)
 
-    # New config did not serve — restore the previous one so the box isn't left crash-looping.
-    if prev.strip():
-        await _ssh(name, [push], input=prev, timeout=120.0)
-        raise HTTPException(422, "new config did not come up (seafront failed to serve) — "
-                                 "reverted to the previous config")
-    raise HTTPException(422, "new config did not come up, and there was no previous config to restore")
+    # Which profile seafront will run: the per-box override, else the image default
+    # (SEAFRONT_MICROSCOPE=mocroscope). Editing any other profile has no effect on startup.
+    active = kv.get("ACTIVE", "").strip() or "mocroscope"
+    profiles = [p.get("system.microscope_name", "") for p in cfg["microscopes"] if isinstance(p, dict)]
+    warning = None
+    if active not in profiles:
+        warning = (f"seafront runs profile {active!r}, which is not in this config "
+                   f"(has: {', '.join(profiles) or 'none'}); it will refuse to start")
+    result = {"ok": True, "synced": True, "sha256": want, "active_profile": active,
+              "warning": warning, "restarted": False}
+    if not restart:
+        return JSONResponse(result)
+
+    async def journal_since_save() -> str:
+        since = kv.get("NOW", "").strip()
+        jargs = ["journalctl", "-u", "seafront", "--no-pager", "-n", "40"]
+        if since.isdigit():
+            jargs += ["--since", f"@{since}"]
+        _rc, log, _err = await _ssh(name, jargs, timeout=20.0)
+        return log.strip()
+
+    rc, out, err = await _ssh(name, ["sudo -n /usr/bin/systemctl restart seafront"], timeout=150.0)
+    if rc != 0:
+        raise HTTPException(502, f"config saved (sha256 verified), but restart failed: "
+                                 f"{(err or out).strip()}\n\n{await journal_since_save()}")
+    result["restarted"] = True
+    # The restart covers stop (hardware close), the image pull in ExecStartPre, container
+    # start and python imports; give it room before calling it failed.
+    if await _wait_service_up(name, timeout=90.0):
+        result["serving"] = True
+        return JSONResponse(result)
+    raise HTTPException(422, f"config saved (sha256 verified) and seafront restarted with "
+                             f"profile {active!r}, but it is not serving on port "
+                             f"{m['seafront_port']} after 90s. Journal since the save:\n\n"
+                             f"{await journal_since_save()}")
 
 
 @app.get("/api/scope/{name}/logs", response_class=PlainTextResponse)
@@ -932,6 +972,7 @@ HTML = """<!doctype html>
                    border-radius: 8px; border: 1px solid #30363d; background: #0e1116; color: #e6edf3; }
   .addform input:focus, .addform select:focus { outline: none; border-color: #58a6ff; }
   .adderr { color: #f85149; font-size: .8rem; min-height: 1.1em; }
+  #cfgerr { white-space: pre-wrap; max-height: 40vh; overflow: auto; font-family: monospace; }
   .addbtns { display: flex; justify-content: flex-end; gap: 8px; margin-top: 2px; }
   button.primary { background: #238636; border-color: #238636; color: #fff; }
   #cfgmodal { position: fixed; inset: 0; background: #000a; display: none; z-index: 10;
@@ -1032,7 +1073,8 @@ HTML = """<!doctype html>
       <div class="adderr" id="cfgerr"></div>
       <div class="addbtns">
         <button onclick="closeCfg()">Cancel</button>
-        <button id="cfgsave" class="primary" onclick="saveConfig()">Save + restart</button>
+        <button id="cfgsave" onclick="saveConfig(false)">Save</button>
+        <button id="cfgsaverestart" class="primary" onclick="saveConfig(true)">Save + restart</button>
       </div>
     </div>
   </div>
@@ -1095,41 +1137,52 @@ async function act(name, action, confirmMsg) {
   setTimeout(() => { refresh(); fetchImages(); }, 1500);
 }
 
-// Edit a box's config.json: load it into a textarea, validate JSON on save, POST it. The
-// server writes it, restarts seafront, and auto-reverts if the box doesn't come back up.
+// Edit a box's config.json: load it into a textarea, validate JSON on save, POST it. "Save"
+// only writes the file (the box confirms by sha256); "Save + restart" also restarts seafront
+// and, if it doesn't serve, shows the journal from that restart. No auto-revert.
+function cfgButtons(on) {
+  document.getElementById('cfgsave').disabled = !on;
+  document.getElementById('cfgsaverestart').disabled = !on;
+}
 async function editConfig(name) {
   const ta = document.getElementById('cfgtext'), err = document.getElementById('cfgerr');
   document.getElementById('cfgtitle').textContent = name + ' — config.json';
   ta.value = 'loading…'; err.textContent = '';
-  document.getElementById('cfgsave').disabled = true;
+  cfgButtons(false);
   const m = document.getElementById('cfgmodal'); m.dataset.box = name; m.classList.add('show');
   try {
     const r = await fetch(`/api/scope/${name}/config`);
     const t = await r.text();
     if (!r.ok) { ta.value = ''; err.textContent = 'could not load config: ' + t; return; }
     ta.value = t;
-    document.getElementById('cfgsave').disabled = false;
+    cfgButtons(true);
   } catch (e) { ta.value = ''; err.textContent = 'load failed: ' + e; }
 }
 function closeCfg() { document.getElementById('cfgmodal').classList.remove('show'); }
-async function saveConfig() {
+async function saveConfig(restart) {
   const name = document.getElementById('cfgmodal').dataset.box;
   const ta = document.getElementById('cfgtext'), err = document.getElementById('cfgerr');
-  const btn = document.getElementById('cfgsave');
   let parsed;
   try { parsed = JSON.parse(ta.value); }
   catch (e) { err.textContent = 'invalid JSON: ' + e.message; return; }
   if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.microscopes)) {
     err.textContent = "config must be a JSON object with a 'microscopes' array"; return;
   }
-  if (!confirm(`Save config to ${name} and restart seafront?\\n\\nIf seafront does not come back up within ~15s, the box is automatically reverted to its previous config.`)) return;
-  btn.disabled = true; err.textContent = 'saving + restarting + verifying (up to ~20s)…';
+  if (restart && !confirm(`Save config to ${name} and restart seafront?`)) return;
+  cfgButtons(false);
+  err.textContent = restart ? 'saving + restarting + waiting for seafront (up to ~2 min)…' : 'saving…';
   try {
-    const r = await fetch(`/api/scope/${name}/config`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: ta.value});
+    const r = await fetch(`/api/scope/${name}/config?restart=${restart ? 1 : 0}`,
+      {method: 'POST', headers: {'Content-Type': 'application/json'}, body: ta.value});
     const j = await r.json().catch(() => ({}));
-    if (r.ok) { closeCfg(); toast(name + ': config saved + seafront restarted ✓'); setTimeout(() => { refresh(); fetchImages(); }, 1000); }
-    else { err.textContent = j.detail || ('failed (HTTP ' + r.status + ')'); btn.disabled = false; }
-  } catch (e) { err.textContent = 'request failed: ' + e; btn.disabled = false; }
+    if (r.ok) {
+      const what = restart ? 'config saved, seafront restarted and serving ✓' : 'config saved (not restarted) ✓';
+      if (j.warning) { err.textContent = 'saved, but: ' + j.warning; cfgButtons(true); }
+      else closeCfg();
+      toast(`${name}: ${what} (profile ${j.active_profile})`);
+      setTimeout(() => { refresh(); fetchImages(); }, 1000);
+    } else { err.textContent = j.detail || ('failed (HTTP ' + r.status + ')'); cfgButtons(true); }
+  } catch (e) { err.textContent = 'request failed: ' + e; cfgButtons(true); }
 }
 
 let IMAGES = {registry: {}, boxes: {}};
@@ -1272,7 +1325,7 @@ async function setWifi(mode) {
     if (ssid === null) return;
     if (ssid) { body.ssid = ssid; const pw = prompt('Password for "' + ssid + '" (blank if open / already saved):', ''); if (pw) body.password = pw; }
   }
-  toast('Wi-Fi: switching to ' + mode + '… (may take ~20s; your link may drop)');
+  toast('Wi-Fi: switching to ' + mode + '… (may take up to ~2 min; your link may drop)');
   try {
     const r = await fetch('/api/wifi/mode', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
     const j = await r.json().catch(() => ({}));
