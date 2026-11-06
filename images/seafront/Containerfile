@@ -26,6 +26,9 @@ ARG SEAFRONT_REPO=https://github.com/slaide/seafront.git
 ARG SEAFRONT_REF=e13a34fe7e6cceface687a14523268f1276b011b
 RUN git clone "$SEAFRONT_REPO" /app \
     && git -C /app checkout "$SEAFRONT_REF"
+# The seafront commit baked in, readable from the registry and `podman image inspect` on a
+# box; the dashboard shows it next to each seafront image.
+LABEL org.opencontainers.image.revision="${SEAFRONT_REF}"
 WORKDIR /app
 # --frozen: build exactly what seafront's committed uv.lock pins (reproducible fleet
 # image). --no-dev keeps pyright/ruff/node out of the runtime image. The cache mount +

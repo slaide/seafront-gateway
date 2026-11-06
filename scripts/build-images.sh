@@ -48,11 +48,16 @@ fi
 if [ "$DO_OS" = 1 ]; then
     echo "==> bake gateway fleet key into the OS image context"
     cp "$HOME/.ssh/fleet.pub" "$DIR/images/kinoite/fleet.pub"
-    echo "==> build seafront-os"
     # --pull=missing: the base is digest-pinned in the Containerfile, so fetch it only when
     # that exact digest is not already in local storage (i.e. right after a deliberate bump
     # via bump-os-base.sh). Avoids re-downloading the multi-GB base on every build.
-    podman build --pull=missing -t "$REG/seafront-os:stable" "$DIR/images/kinoite"
+    # Gateway commit -> image label (bootc shows it as the OS version). -dirty marks a build
+    # from uncommitted changes, which no commit hash describes.
+    GW_REV="$(git -C "$DIR" rev-parse --short HEAD)"
+    git -C "$DIR" diff --quiet HEAD -- images/kinoite || GW_REV="$GW_REV-dirty"
+    echo "==> build seafront-os @ gateway $GW_REV"
+    podman build --pull=missing -t "$REG/seafront-os:stable" \
+        --build-arg GATEWAY_REV="$GW_REV" "$DIR/images/kinoite"
     podman push --tls-verify=false "$REG/seafront-os:stable"
 fi
 

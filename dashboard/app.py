@@ -261,7 +261,7 @@ async def _registry_image(client: httpx.AsyncClient, repo: str, tag: str = "stab
                                  headers={"Accept": _MANIFEST_ACCEPT}, timeout=4.0)
             man = r.json()
         cfg_digest = man.get("config", {}).get("digest")
-        version = created = None
+        version = revision = created = None
         if cfg_digest:
             rc = await client.get(f"{base}/blobs/{cfg_digest}", timeout=4.0)
             if rc.status_code == 200:
@@ -269,7 +269,8 @@ async def _registry_image(client: httpx.AsyncClient, repo: str, tag: str = "stab
                 created = cfg.get("created")
                 labels = cfg.get("config", {}).get("Labels") or {}
                 version = labels.get("org.opencontainers.image.version")
-        return {"digest": digest, "version": version, "created": created}
+                revision = labels.get("org.opencontainers.image.revision")
+        return {"digest": digest, "version": version, "revision": revision, "created": created}
     except Exception as e:
         return {"error": str(e)}
 
@@ -308,7 +309,9 @@ def _parse_app(text: str) -> dict:
         d = arr[0] if isinstance(arr, list) and arr else {}
     except Exception:
         return {"present": False}
-    return {"present": True, "digest": d.get("Digest"), "created": d.get("Created")}
+    labels = d.get("Labels") or (d.get("Config") or {}).get("Labels") or {}
+    return {"present": True, "digest": d.get("Digest"), "created": d.get("Created"),
+            "revision": labels.get("org.opencontainers.image.revision")}
 
 
 # List the profile names in the box's config.json (no sudo — pharmbio owns it). Single
@@ -1111,6 +1114,8 @@ function toast(msg) {
   clearTimeout(t._h); t._h = setTimeout(() => t.style.display = 'none', 4000);
 }
 function short(d) { return d ? d.replace('sha256:', '').slice(0, 12) : '?'; }
+// seafront git commit an image was built from (image label); empty for older unlabeled images.
+function rev(r) { return r ? ' @' + r.slice(0, 8) : ''; }
 function fdate(iso) { if (!iso) return ''; const t = new Date(iso); return isNaN(t) ? '' : t.toLocaleDateString(); }
 // Full build timestamp as YYYYMMDD-HHMM (local time) — distinguishes multiple rebuilds/day.
 function ftime(iso) {
@@ -1133,7 +1138,7 @@ function osLine(o, reg) {
 function appLine(a, reg) {
   if (!a || a.present === false) return '<span class="muted">seafront image: not present</span>';
   const t = ftime(a.created);
-  let s = 'seafront' + (t ? ' ' + t : '') + ' · ' + short(a.digest);
+  let s = 'seafront' + rev(a.revision) + (t ? ' ' + t : '') + ' · ' + short(a.digest);
   if (a.up_to_date) s += ' <span class="ok">up to date</span>';
   else if (reg && reg.digest) s += ' <span class="stale">update → ' + (ftime(reg.created) || short(reg.digest)) + '</span>';
   return s;
@@ -1226,7 +1231,7 @@ async function fetchImages() {
     document.getElementById('regos').textContent =
       'OS ' + (ro.error ? '(error)' : ((ro.version || short(ro.digest)) + (ftime(ro.created) ? ' · ' + ftime(ro.created) : '') + ' · ' + short(ro.digest)));
     document.getElementById('regapp').textContent =
-      'seafront ' + (ra.error ? '(error)' : ((ftime(ra.created) ? ftime(ra.created) + ' · ' : '') + short(ra.digest)));
+      'seafront' + rev(ra.revision) + ' ' + (ra.error ? '(error)' : ((ftime(ra.created) ? ftime(ra.created) + ' · ' : '') + short(ra.digest)));
   } catch (e) { document.getElementById('regos').textContent = 'OS (unreachable)'; }
   refresh();
 }

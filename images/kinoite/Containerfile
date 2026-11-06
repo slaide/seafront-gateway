@@ -64,3 +64,11 @@ RUN systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.tar
 
 # bootc/ostree image-mode requirement: a lint pass that the image is bootable.
 RUN bootc container lint || true
+
+# Stamp the gateway commit this OS image was built from (build-images.sh passes it).
+# bootc reports the version label in `bootc status`, which is what the dashboard shows
+# per box, so this is how you tell which gateway checkout a box is running. Last in the
+# file so a new commit only changes image metadata, not any cached layer.
+ARG GATEWAY_REV=unknown
+LABEL org.opencontainers.image.version="gw-${GATEWAY_REV}" \
+      org.opencontainers.image.revision="${GATEWAY_REV}"
