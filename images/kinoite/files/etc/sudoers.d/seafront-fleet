@@ -2,7 +2,8 @@
 # can drive this box — and nothing else. Covers the dashboard's image reads, both
 # update routes (OS via bootc, app via podman), app restart, reboot, /etc drift
 # check/reset (seafront-etc-sync), clock step after the gateway's time is set by hand
-# (chronyc makestep), and central
+# (chronyc makestep), the diagnostics view's serial-port listing inside the app
+# container (podman exec ... list_ports), and central
 # renumbering (nmcli — broad on purpose: the gateway already has full control of the
 # box over this trusted backbone, so scoping nmcli further buys nothing).
 #
@@ -28,6 +29,7 @@ pharmbio ALL=(root) NOPASSWD: \
     /usr/bin/nmcli connection up *, \
     /usr/bin/nmcli device reapply *, \
     /usr/bin/chronyc makestep, \
+    /usr/bin/podman exec seafront /app/.venv/bin/python -m serial.tools.list_ports -v, \
     /usr/bin/seafront-etc-sync --check, \
     /usr/bin/seafront-etc-sync, \
     /usr/sbin/reboot

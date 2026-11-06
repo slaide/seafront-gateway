@@ -345,6 +345,136 @@ def _parse_clock(chrony_out: str, box_date: str, returned_at: float) -> dict:
     return clock
 
 
+# --- diagnostics ----------------------------------------------------------------
+# Runs ON the box as pharmbio (stdlib python3 of the OS image), prints one JSON object.
+# `summary` is the cheap part folded into every images poll (card uptime + the amber
+# Diagnostics button); `full` adds the container's own view of the serial ports, which
+# needs `podman exec` (sudoers) and is only run when the Diagnostics dialog is opened.
+_DIAG_PY = r"""
+import glob, json, os, subprocess, sys, time
+full = sys.argv[1:] == ["full"]
+H = os.path.expanduser("~/seafront")
+def rd(p, d=None):
+    try:
+        with open(p) as f:
+            return f.read().strip()
+    except OSError:
+        return d
+def run(argv, t=10):
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=t)
+        return r.returncode, r.stdout + r.stderr
+    except Exception as e:
+        return -1, str(e)
+o = {"uptime_s": float((rd("/proc/uptime") or "0").split()[0])}
+o["selinux"] = {"1": "enforcing", "0": "permissive"}.get(rd("/sys/fs/selinux/enforce"), "disabled")
+b = rd("/sys/fs/selinux/booleans/container_use_devices")
+o["container_use_devices"] = None if b is None else b.split()[0] == "1"
+st = os.statvfs("/var")
+o["disk"] = {"path": "/var", "total": st.f_blocks * st.f_frsize,
+             "used": (st.f_blocks - st.f_bfree) * st.f_frsize, "free": st.f_bavail * st.f_frsize}
+_, out = run(["systemctl", "show", "seafront", "-p", "ActiveState", "-p", "SubState",
+              "-p", "NRestarts", "-p", "ActiveEnterTimestamp", "-p", "ActiveEnterTimestampMonotonic"])
+kv = dict(l.split("=", 1) for l in out.splitlines() if "=" in l)
+mono = int(kv.get("ActiveEnterTimestampMonotonic") or 0)
+o["service"] = {"state": kv.get("ActiveState"), "sub": kv.get("SubState"),
+                "restarts": int(kv.get("NRestarts") or 0), "since": kv.get("ActiveEnterTimestamp") or None,
+                # systemd's monotonic clock is CLOCK_MONOTONIC, same as time.monotonic()
+                "uptime_s": time.monotonic() - mono / 1e6 if kv.get("ActiveState") == "active" and mono else None}
+prof = rd(H + "/active_microscope")
+o["profile_source"] = "override" if prof else "image default"
+if not prof:
+    for l in (rd("/etc/containers/systemd/seafront.container") or "").splitlines():
+        if l.startswith("Environment=SEAFRONT_MICROSCOPE="):
+            prof = l.split("=", 2)[2].strip()
+o["profile"] = prof
+m = None
+try:
+    with open(H + "/config.json") as f:
+        m = next((x for x in json.load(f).get("microscopes", []) if x.get("system.microscope_name") == prof), None)
+except Exception:
+    pass
+o["profile_found"] = m is not None
+o["mock"] = bool(m) and m.get("system.microscope_type") == "mock"
+o["devices"] = [{"key": k, "id": m[k], "driver": m.get(k[:-3] + ".driver")}
+                for k in sorted(m or {}) if k.endswith(".id") and isinstance(m[k], str)]
+usb = []
+for d in sorted(glob.glob("/sys/bus/usb/devices/*")):
+    if not rd(d + "/idVendor") or rd(d + "/bDeviceClass") == "09":   # no interfaces, no hubs
+        continue
+    usb.append({"bus": os.path.basename(d), "vid": rd(d + "/idVendor"), "pid": rd(d + "/idProduct"),
+                "manufacturer": rd(d + "/manufacturer"), "product": rd(d + "/product"),
+                "serial": rd(d + "/serial"), "tty": []})
+bybus = {u["bus"]: u for u in usb}
+for t in sorted(glob.glob("/sys/class/tty/ttyACM*") + glob.glob("/sys/class/tty/ttyUSB*")):
+    p = os.path.realpath(t + "/device")
+    for _ in range(4):
+        if os.path.basename(p) in bybus:
+            bybus[os.path.basename(p)]["tty"].append("/dev/" + os.path.basename(t))
+            break
+        p = os.path.dirname(p)
+o["usb"] = usb
+if full:
+    rc, out = run(["sudo", "-n", "/usr/bin/podman", "exec", "seafront",
+                   "/app/.venv/bin/python", "-m", "serial.tools.list_ports", "-v"], 20)
+    o["container_ports"] = {"rc": rc, "out": out}
+    o["chrony"] = run(["chronyc", "-n", "tracking"])[1]
+o["now"] = time.time()   # last, so it is as close as possible to the ssh return
+print(json.dumps(o))
+"""
+
+
+def _placeholder_id(i: str) -> bool:
+    return not i.strip() or "PLACEHOLDER" in i.upper()
+
+
+def _diag_issues(d: dict | None, clock: dict | None) -> list[str]:
+    """Things worth a look, short enough for a tooltip. Drives the amber Diagnostics button."""
+    if not d:
+        return []
+    out: list[str] = []
+    if clock and clock.get("offset_s") is not None and abs(clock["offset_s"]) >= 1:
+        out.append(f"clock off by {clock['offset_s']:+.1f} s")
+    if clock and not clock.get("synced"):
+        out.append("clock not synced")
+    if d.get("selinux") != "enforcing":
+        out.append(f"SELinux {d.get('selinux')}")
+    if d.get("container_use_devices") is False:
+        out.append("container_use_devices off: the container cannot open USB devices")
+    disk = d.get("disk") or {}
+    if disk.get("total") and disk["free"] / disk["total"] < 0.10:
+        out.append(f"{disk['path']} {100 - 100 * disk['free'] // disk['total']}% full")
+    svc = d.get("service") or {}
+    if svc.get("state") != "active":
+        out.append(f"seafront service {svc.get('state')} ({svc.get('sub')})")
+    elif svc.get("restarts") and (svc.get("uptime_s") or 0) < 600:
+        out.append(f"seafront restarted {svc['restarts']}x, up only {int(svc['uptime_s'] or 0)} s")
+    if not d.get("profile_found"):
+        out.append(f"profile {d.get('profile')!r} not in config.json")
+    elif not d.get("mock"):
+        serials = {u.get("serial") for u in d.get("usb") or []}
+        for dev in d.get("devices") or []:
+            if _placeholder_id(dev["id"]):
+                out.append(f"{dev['key']} is a placeholder")
+            elif dev["id"] not in serials:
+                out.append(f"{dev['key']} {dev['id']} not on USB")
+    cp = d.get("container_ports")
+    if cp and cp["rc"] == 0 and not d.get("mock"):
+        for dev in d.get("devices") or []:
+            if dev["key"] == "microcontroller.id" and not _placeholder_id(dev["id"]) \
+                    and f"SER={dev['id']}" not in cp["out"]:
+                out.append(f"microcontroller {dev['id']} not visible inside the container")
+    return out
+
+
+def _parse_diag(text: str) -> dict | None:
+    try:
+        d = json.loads(text.strip().splitlines()[-1])
+        return d if isinstance(d, dict) else None
+    except Exception:
+        return None
+
+
 # List the profile names in the box's config.json (no sudo — pharmbio owns it). Single
 # argv element / single-quoted python so ssh's space-join + remote re-parse keep it intact.
 _LIST_PROFILES_CMD = (
@@ -369,6 +499,9 @@ _BOX_IMAGES_CMD = (
     # image-owned /etc files that differ from the image (bootc keeps local edits across
     # upgrades); rc line distinguishes "no drift" from "check unavailable" (older image)
     "sudo -n /usr/bin/seafront-etc-sync --check 2>/dev/null; echo \"rc=$?\""
+    "; echo '<<<SPLIT>>>'; "
+    # uptime, service state, SELinux, disk, USB vs the active profile (see _DIAG_PY)
+    f"python3 -c {shlex.quote(_DIAG_PY)} summary 2>/dev/null"
     "; echo '<<<SPLIT>>>'; "
     # clock: chrony's view (which server, synced?) + the box's wall clock, read LAST so it
     # is taken as close as possible to when the SSH call returns (see _parse_clock)
@@ -412,14 +545,18 @@ async def _box_images(name: str) -> dict:
     prof_part = parts[2] if len(parts) > 2 else ""
     active_part = parts[3] if len(parts) > 3 else ""
     drift_part = parts[4] if len(parts) > 4 else ""
-    chrony_part = parts[5] if len(parts) > 5 else ""
-    date_part = parts[6] if len(parts) > 6 else ""
+    diag_part = parts[5] if len(parts) > 5 else ""
+    chrony_part = parts[6] if len(parts) > 6 else ""
+    date_part = parts[7] if len(parts) > 7 else ""
     profiles = [p.strip() for p in prof_part.splitlines() if p.strip()]
     os_info = _parse_bootc(os_part)
     os_info["etc_drift"] = _parse_drift(drift_part)
+    clock = _parse_clock(chrony_part, date_part, returned_at)
+    diag = _parse_diag(diag_part)
     result = {"name": name, "os": os_info, "seafront": _parse_app(app_part),
               "microscopes": profiles, "active": active_part.strip() or None,
-              "clock": _parse_clock(chrony_part, date_part, returned_at)}
+              "clock": clock, "uptime_s": (diag or {}).get("uptime_s"),
+              "issues": _diag_issues(diag, clock)}
     _LAST_BOX_IMAGES[name] = (copy.deepcopy(result), time.monotonic())
     return {**result, "stale_seconds": 0}
 
@@ -589,6 +726,18 @@ async def get_logs(name: str, lines: int = 200) -> str:
     if rc != 0:
         raise HTTPException(502, f"could not read logs: {err or out}".strip())
     return out
+
+
+@app.get("/api/scope/{name}/diagnostics")
+async def get_diagnostics(name: str) -> JSONResponse:
+    """Everything the Diagnostics dialog shows except the log (fetched separately)."""
+    rc, out, err = await _ssh(name, ["python3", "-", "full"], timeout=40.0, input=_DIAG_PY)
+    returned_at = time.time()
+    d = _parse_diag(out)
+    if d is None:
+        raise HTTPException(502, f"diagnostics failed (exit {rc}): {(err or out).strip()[-2000:]}")
+    clock = _parse_clock(d.get("chrony") or "", str(d.get("now", "")), returned_at)
+    return JSONResponse({**d, "clock": clock, "issues": _diag_issues(d, clock)})
 
 
 # --- long-running image updates (streamed as per-box background jobs) ----------
@@ -1084,6 +1233,21 @@ HTML = """<!doctype html>
                padding: 14px 18px; border-bottom: 1px solid #30363d; }
   #modalbody { margin: 0; padding: 16px 18px; overflow: auto; white-space: pre-wrap;
                font: 13px/1.45 ui-monospace, monospace; color: #c9d1d9; }
+  #modaltabs { display: none; gap: 6px; padding: 10px 18px 0; border-bottom: 1px solid #30363d; }
+  #modaltabs button { border-radius: 8px 8px 0 0; border-bottom: none; padding: 6px 14px; }
+  #modaltabs button.on { background: #0d1117; border-color: #6e7681; }
+  #modaltabs .spacer { flex: 1; }
+  #modalhtml { display: none; padding: 16px 18px; overflow: auto; font-size: .85rem; }
+  #modalhtml h3 { font-size: .9rem; margin: 18px 0 8px; color: #e6edf3; }
+  #modalhtml h3:first-child { margin-top: 0; }
+  #modalhtml pre { white-space: pre-wrap; font: 12px/1.4 ui-monospace, monospace; color: #c9d1d9;
+                   background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 10px; }
+  .dtable { border-collapse: collapse; width: 100%; font-family: ui-monospace, monospace; font-size: .8rem; }
+  .dtable th { text-align: left; color: #8b949e; font-weight: 600; }
+  .dtable th, .dtable td { padding: 5px 8px; border-bottom: 1px solid #21262d; vertical-align: top; }
+  .diskbar { height: 8px; background: #21262d; border-radius: 4px; overflow: hidden; max-width: 320px; margin-top: 4px; }
+  .diskbar div { height: 100%; background: #3fb950; }
+  .diskbar div.full { background: #d29922; }
   #toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
            background: #161b22; border: 1px solid #30363d; border-radius: 8px;
            padding: 10px 16px; font-size: .85rem; display: none; }
@@ -1162,7 +1326,15 @@ HTML = """<!doctype html>
 <div id="modal"><div id="modalbox">
   <div id="modalhead"><strong id="modaltitle"></strong>
     <button onclick="closeModal()">close</button></div>
+  <div id="modaltabs">
+    <button data-tab="log" onclick="diagTab('log')">Log</button>
+    <button data-tab="hardware" onclick="diagTab('hardware')">Hardware</button>
+    <button data-tab="system" onclick="diagTab('system')">System</button>
+    <span class="spacer"></span>
+    <button onclick="diagReload()">↻ refresh</button>
+  </div>
   <pre id="modalbody"></pre>
+  <div id="modalhtml"></div>
 </div></div>
 <div id="toast"></div>
 
@@ -1252,13 +1424,129 @@ function osLine(o, reg) {
 }
 // Box clock vs gateway clock. Warn past 1 s: SSH latency alone stays well below that.
 function clockLine(c) {
-  if (!c || c.offset_s == null) return '<span class="muted">clock: unknown</span>';
+  if (!c || c.offset_s == null) return '<span class="muted">unknown</span>';
   const off = c.offset_s, abs = Math.abs(off);
   const txt = abs < 1 ? (off >= 0 ? '+' : '') + (off * 1000).toFixed(0) + ' ms'
                       : (off >= 0 ? '+' : '') + off.toFixed(1) + ' s';
-  const src = c.synced ? 'synced to ' + c.server : '<b>not synced</b>' + (c.server ? ' (' + c.server + ')' : '');
+  const src = c.synced ? 'synced to ' + esc(c.server) : '<b>not synced</b>' + (c.server ? ' (' + esc(c.server) + ')' : '');
   const cls = (abs >= 1 || !c.synced) ? 'stale' : 'ok';
-  return '<span class="' + cls + '">clock ' + txt + ' vs gateway · ' + src + '</span>';
+  return '<span class="' + cls + '">' + txt + ' vs gateway · ' + src + '</span>';
+}
+function esc(v) {
+  return String(v == null ? '' : v).replace(/[&<>"']/g, ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
+}
+function dur(sec) {
+  if (sec == null) return '?';
+  sec = Math.floor(sec);
+  const d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600), m = Math.floor(sec % 3600 / 60);
+  if (d) return d + 'd ' + h + 'h';
+  if (h) return h + 'h ' + m + 'm';
+  if (m) return m + 'm';
+  return sec + 's';
+}
+function gb(b) { return (b / 1e9).toFixed(1) + ' GB'; }
+
+// Diagnostics dialog: Log (journal) / Hardware (configured USB IDs vs what the host and the
+// container see) / System (uptime, service restarts, clock, SELinux, disk). Hardware and
+// System share one fetch; Log is fetched on its own.
+let DIAG = null;   // {name, data | null, error | null}
+async function diagnostics(name) {
+  MODAL_JOB = null;
+  document.getElementById('modaltitle').textContent = name + ' — diagnostics';
+  document.getElementById('modaltabs').style.display = 'flex';
+  document.getElementById('modal').classList.add('show');
+  DIAG = {name, data: null, error: null, tab: null};
+  const issues = (IMAGES.boxes[name] || {}).issues || [];
+  diagTab(issues.length ? 'system' : 'log');
+  await diagLoad();
+}
+async function diagLoad() {
+  const d = DIAG; if (!d) return;
+  d.data = null; d.error = null;
+  if (d.tab !== 'log') diagTab(d.tab);
+  try {
+    const r = await fetch('/api/scope/' + d.name + '/diagnostics');
+    const j = await r.json().catch(() => ({}));
+    if (r.ok) d.data = j; else d.error = j.detail || ('HTTP ' + r.status);
+  } catch (e) { d.error = String(e); }
+  if (DIAG === d && d.tab !== 'log') diagTab(d.tab);
+}
+function diagReload() {
+  if (!DIAG) return;
+  if (DIAG.tab === 'log') diagTab('log'); else diagLoad();
+}
+async function diagTab(tab) {
+  const d = DIAG; if (!d) return;
+  d.tab = tab;
+  document.querySelectorAll('#modaltabs button[data-tab]').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
+  const pre = document.getElementById('modalbody'), html = document.getElementById('modalhtml');
+  pre.style.display = tab === 'log' ? '' : 'none';
+  html.style.display = tab === 'log' ? 'none' : 'block';
+  if (tab === 'log') {
+    pre.textContent = 'loading…';
+    try {
+      const r = await fetch('/api/scope/' + d.name + '/logs?lines=500');
+      const t = await r.text();
+      if (DIAG === d && d.tab === 'log') { pre.textContent = t; pre.scrollTop = pre.scrollHeight; }
+    } catch (e) { pre.textContent = 'error: ' + e; }
+    return;
+  }
+  if (d.error) { html.innerHTML = '<span class="stale">' + esc(d.error) + '</span>'; return; }
+  if (!d.data) { html.innerHTML = '<span class="muted">loading…</span>'; return; }
+  html.innerHTML = tab === 'hardware' ? diagHardware(d.data) : diagSystem(d.data);
+}
+function issueList(x) {
+  if (!x.issues.length) return '<div class="ok">no problems found</div>';
+  return x.issues.map(i => '<div class="stale">⚠ ' + esc(i) + '</div>').join('');
+}
+function diagHardware(x) {
+  const ph = id => !id.trim() || id.toUpperCase().includes('PLACEHOLDER');
+  const cp = x.container_ports || {};
+  let h = '<h3>Configured devices · profile ' + esc(x.profile) + ' (' + esc(x.profile_source) + ')</h3>';
+  if (!x.profile_found) h += '<div class="stale">⚠ profile not found in config.json</div>';
+  else if (x.mock) h += '<div class="muted">mock profile: no hardware expected</div>';
+  if (x.devices.length) {
+    h += '<table class="dtable"><tr><th>config key</th><th>id</th><th>driver</th><th>host USB</th><th>container</th></tr>';
+    for (const dev of x.devices) {
+      const u = x.usb.find(u => u.serial === dev.id);
+      let host, cont = '<span class="muted">n/a</span>';
+      if (ph(dev.id)) host = '<span class="muted">placeholder</span>';
+      else if (u) host = '<span class="ok">✓ ' + esc(u.bus) + ' ' + esc(u.product || '') + (u.tty.length ? ' · ' + esc(u.tty.join(' ')) : '') + '</span>';
+      else host = '<span class="stale">✗ not connected</span>';
+      if (dev.key === 'microcontroller.id' && !ph(dev.id)) {
+        if (cp.rc === 0) cont = cp.out.includes('SER=' + dev.id) ? '<span class="ok">✓ visible</span>' : '<span class="stale">✗ not visible</span>';
+        else cont = '<span class="muted">unknown</span>';
+      }
+      h += '<tr><td>' + esc(dev.key) + '</td><td>' + esc(dev.id) + '</td><td>' + esc(dev.driver || '') + '</td><td>' + host + '</td><td>' + cont + '</td></tr>';
+    }
+    h += '</table>';
+  }
+  h += '<h3>USB devices on the host</h3><table class="dtable"><tr><th>bus</th><th>vid:pid</th><th>manufacturer</th><th>product</th><th>serial</th><th>tty</th></tr>';
+  for (const u of x.usb)
+    h += '<tr><td>' + esc(u.bus) + '</td><td>' + esc(u.vid) + ':' + esc(u.pid) + '</td><td>' + esc(u.manufacturer || '') + '</td><td>' + esc(u.product || '') + '</td><td>' + esc(u.serial || '') + '</td><td>' + esc(u.tty.join(' ')) + '</td></tr>';
+  h += '</table><h3>Serial ports inside the seafront container (what seafront sees)</h3>';
+  if (cp.rc === 0) h += '<pre>' + esc(cp.out.trim() || '(none)') + '</pre>';
+  else h += '<div class="muted">unavailable: ' + esc((cp.out || '').trim()) + ' (needs an OS image with the list_ports sudoers rule, and a running container)</div>';
+  return h;
+}
+function diagSystem(x) {
+  const s = x.service || {}, dk = x.disk || {};
+  const pct = dk.total ? Math.round(100 * (dk.total - dk.free) / dk.total) : 0;
+  const row = (k, v) => '<tr><th>' + k + '</th><td>' + v + '</td></tr>';
+  let h = '<h3>Problems</h3>' + issueList(x) + '<h3>Status</h3><table class="dtable">';
+  h += row('computer uptime', dur(x.uptime_s));
+  h += row('seafront service', '<span class="' + (s.state === 'active' ? 'ok' : 'stale') + '">' + esc(s.state) + ' (' + esc(s.sub) + ')</span>'
+        + (s.uptime_s != null ? ' · up ' + dur(s.uptime_s) + ' · since ' + esc(s.since) : ''));
+  h += row('automatic restarts', '<span class="' + (s.restarts ? 'stale' : '') + '">' + s.restarts + '</span>'
+        + ' <span class="muted">(crash restarts since boot or the last manual restart)</span>');
+  h += row('clock', clockLine(x.clock));
+  h += row('SELinux', '<span class="' + (x.selinux === 'enforcing' ? 'ok' : 'stale') + '">' + esc(x.selinux) + '</span>'
+        + ' · container_use_devices ' + (x.container_use_devices ? '<span class="ok">on</span>' : '<span class="stale">' + (x.container_use_devices === false ? 'off' : 'unknown') + '</span>'));
+  h += row('disk ' + esc(dk.path), gb(dk.total - dk.free) + ' used of ' + gb(dk.total) + ' · ' + gb(dk.free) + ' free (' + pct + '%)'
+        + '<div class="diskbar"><div class="' + (pct >= 90 ? 'full' : '') + '" style="width:' + pct + '%"></div></div>');
+  h += '</table>';
+  if (x.chrony) h += '<h3>chronyc tracking</h3><pre>' + esc(x.chrony.trim()) + '</pre>';
+  return h;
 }
 function appLine(a, reg) {
   if (!a || a.present === false) return '<span class="muted">seafront image: not present</span>';
@@ -1269,17 +1557,6 @@ function appLine(a, reg) {
   return s;
 }
 
-async function view(name, kind) {
-  MODAL_JOB = null;
-  const box = document.getElementById('modalbody');
-  document.getElementById('modaltitle').textContent = `${name} — ${kind}`;
-  box.textContent = 'loading…';
-  document.getElementById('modal').classList.add('show');
-  try {
-    const r = await fetch(`/api/scope/${name}/${kind}`);
-    box.textContent = await r.text();
-  } catch (e) { box.textContent = 'error: ' + e; }
-}
 async function act(name, action, confirmMsg) {
   if (confirmMsg && !confirm(confirmMsg)) return;
   toast(`${name}: ${action}…`);
@@ -1346,7 +1623,13 @@ let IMAGES = {registry: {}, boxes: {}};
 // the (optional, dismissible) modal is currently showing.
 const BOXJOBS = {};
 let MODAL_JOB = null;
-function closeModal() { MODAL_JOB = null; document.getElementById('modal').classList.remove('show'); }
+function closeModal() {
+  MODAL_JOB = null; DIAG = null;
+  document.getElementById('modal').classList.remove('show');
+  document.getElementById('modaltabs').style.display = 'none';
+  document.getElementById('modalhtml').style.display = 'none';
+  document.getElementById('modalbody').style.display = '';
+}
 async function fetchImages() {
   try {
     const d = await (await fetch('/api/images')).json();
@@ -1721,6 +2004,7 @@ async function refresh() {
     const regOs = (IMAGES.registry.os || {}).digest;
     const osStale = osd.available && regOs && osd.digest !== regOs && !osd.staged_latest;
     const appStale = appd.present && !appd.up_to_date && (IMAGES.registry.seafront || {}).digest;
+    const issues = img.issues || [];
     const job = BOXJOBS[m.name];
     const jobRunning = !!(job && job.running);
     const jr = jobRunning ? 'disabled' : '';
@@ -1730,20 +2014,19 @@ async function refresh() {
     card.innerHTML = `
       <div class="name">${m.name}</div>
       <div class="signals">
-        <div class="sig"><span class="dot ${hs}"></span>Computer: ${m.host_up ? 'online' : 'offline'}</div>
+        <div class="sig"><span class="dot ${hs}"></span>Computer: ${m.host_up ? 'online' : 'offline'}${m.host_up && img.uptime_s != null ? ' <span class="muted">· up ' + dur(img.uptime_s) + '</span>' : ''}</div>
         <div class="sig"><span class="dot ${ss}"></span>seafront: ${m.service_up ? 'running' : 'down'}</div>
       </div>
       <div class="meta">${m.host}:${m.seafront_port} · via gateway :${m.proxy_port}</div>
       <div class="ver">${osLine(osd, IMAGES.registry.os)}</div>
       <div class="ver">${appLine(appd, IMAGES.registry.seafront)}</div>
-      <div class="ver">${clockLine(img.clock)}</div>
       ${img.stale_seconds ? `<div class="ver stale">⏳ last read failed — showing values from ${img.stale_seconds}s ago</div>` : ''}
       ${jobLine}
       <div class="btns">
         <a class="open ${m.service_up ? '' : 'down'}" href="${url}">${m.service_up ? 'Open' : 'Offline'}</a>
         <button onclick="act('${m.name}','restart-service')">Restart service</button>
         <button onclick="editConfig('${m.name}')">Config</button>
-        <button onclick="view('${m.name}','logs')">View logs</button>
+        <button class="${issues.length ? 'hot' : ''}" title="${esc(issues.join(' · '))}" onclick="diagnostics('${m.name}')">Diagnostics${issues.length ? ' ⚠ ' + issues.length : ''}</button>
         <button class="${osStale ? 'hot' : ''}" ${jr} onclick="updateOs('${m.name}')">Update OS</button>
         <button class="${appStale ? 'hot' : ''}" ${jr} onclick="updateApp('${m.name}')">Update seafront</button>
         <button ${jr} onclick="changeIp('${m.name}')">Change IP</button>
