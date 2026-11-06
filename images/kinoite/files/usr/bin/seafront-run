@@ -5,13 +5,13 @@
 # service. The container is --rm, so nothing persists except the mounted state dir.
 #
 #   sudo seafront-run                                     # interactive shell in /app
-#   sudo seafront-run uv run --no-sync scripts/list_squid_hardware.py
+#   sudo seafront-run uv run scripts/list_squid_hardware.py
 #   sudo seafront-run lsusb
 #
 # Notes:
-#   - uv is preinstalled; use `uv run --no-sync` for python (plain `uv run` re-resolves
-#     dependencies and fails offline). WORKDIR is /app (the seafront source), so script
-#     paths are relative to there.
+#   - uv is preinstalled and the image sets UV_NO_SYNC=1 UV_OFFLINE=1, so plain `uv run`
+#     uses the pre-built venv and never touches the network. WORKDIR is /app (the
+#     seafront source), so script paths are relative to there.
 #   - the seafront image lives in rootful podman storage, so this needs root; it
 #     re-execs itself under sudo if you forget.
 #   - override the image with SEAFRONT_IMAGE=... if you need a specific tag/digest.

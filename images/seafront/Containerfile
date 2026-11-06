@@ -12,8 +12,9 @@ FROM python:3.13-slim-bookworm
 # runtime libs: opencv needs libGL+glib; cameras/Teensy need libusb; git for the VCS deps;
 # usbutils gives `lsusb`, which seafront's Galaxy enumeration + list_squid_hardware.py shell
 # out to for the raw USB VID:PID lookup (without it, camera discovery finds nothing).
+# less + micro: for poking around inside the container (seafront-run / podman exec).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        git libgl1 libglib2.0-0 libusb-1.0-0 usbutils \
+        git libgl1 libglib2.0-0 libusb-1.0-0 usbutils less micro \
     && rm -rf /var/lib/apt/lists/*
 
 # uv, pinned by digest-free tag (build host has internet)
@@ -31,6 +32,10 @@ WORKDIR /app
 # lowered concurrency make the (network-heavy) build robust on the gateway's link.
 RUN --mount=type=cache,target=/root/.cache/uv \
     UV_CONCURRENT_DOWNLOADS=4 UV_HTTP_TIMEOUT=120 uv sync --frozen --no-dev
+# Boxes are offline. Plain `uv run` re-syncs the project first (and pulls the dev group,
+# which is not in the image), so it fails without internet. Make every `uv run` in the
+# container behave like `uv run --no-sync`, and never try the network. Set AFTER the sync.
+ENV UV_NO_SYNC=1 UV_OFFLINE=1
 
 # Daheng Galaxy camera SDK (native). gxipy — installed above by uv — loads
 # /usr/lib/libgxiapi.so via ctypes but does NOT ship the SDK, so without it camera discovery
