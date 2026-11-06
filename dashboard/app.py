@@ -505,8 +505,9 @@ _BOX_IMAGES_CMD = (
     "; echo '<<<SPLIT>>>'; "
     # clock: chrony's view (which server, synced?) + the box's wall clock, read LAST so it
     # is taken as close as possible to when the SSH call returns (see _parse_clock)
-    # `| cat`: with its stdout directly on the ssh channel, chronyc 4.9 prints nothing and
-    # exits 0 (any pipe works); that is also why `-c` once looked broken
+    # `| cat`: with its stdout directly on the ssh channel (or uvicorn's subprocess pipe, see
+    # _gateway_time), chronyc 4.9 prints nothing and exits 0; that is also why `-c` once
+    # looked broken
     "chronyc -n tracking 2>/dev/null | cat"
     "; echo '<<<SPLIT>>>'; "
     "date +%s.%N"
@@ -905,7 +906,9 @@ async def _gateway_time() -> dict:
     """Gateway wall clock + chrony's view of it. Offline, chrony serves this clock to the
     whole fleet (`local stratum 10`), so this is the time every box ends up with."""
     try:
-        _rc, tracking, _ = await _run_local(["chronyc", "-n", "tracking"], timeout=5.0)
+        # `| cat`: inside the uvicorn service chronyc prints nothing (exit 0) when its stdout
+        # is the event loop's pipe; through a shell pipe it works (same as on the boxes)
+        _rc, tracking, _ = await _run_local(["sh", "-c", "chronyc -n tracking | cat"], timeout=5.0)
     except HTTPException:
         tracking = ""
     try:
@@ -1165,9 +1168,14 @@ HTML = """<!doctype html>
   h1 { margin: 0; font-size: 1.4rem; letter-spacing: .02em; }
   .sub { color: #8b949e; font-size: .9rem; margin-top: 4px; }
   .gateway { margin-top: 14px; padding: 14px 16px; background: #161b22; border: 1px solid #30363d;
-             border-radius: 12px; display: inline-flex; flex-direction: column; gap: 7px;
-             min-width: 360px; }
-  .gwrow { display: flex; align-items: center; gap: 10px; }
+             border-radius: 12px; display: flex; flex-direction: column; gap: 12px; }
+  .gwrow { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .gwsecs { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+  .gwsec { background: #0e1116; border: 1px solid #21262d; border-radius: 10px; padding: 10px 12px;
+           display: flex; flex-direction: column; gap: 6px; }
+  .gwsec h2 { margin: 0 0 2px; font-size: .7rem; font-weight: 700; letter-spacing: .08em;
+              text-transform: uppercase; color: #8b949e; }
+  .gwsec .gwbtns { margin-top: auto; flex-wrap: wrap; }
   .gwname { font-size: 1rem; }
   .flag { font-size: .7rem; padding: 2px 9px; border-radius: 999px; letter-spacing: .05em;
           text-transform: uppercase; }
@@ -1200,11 +1208,20 @@ HTML = """<!doctype html>
   button.hot { border-color: #bb8009; color: #f0c674; }
   .toolbar { padding: 0 24px; }
   .grid { display: grid; gap: 16px; padding: 16px 24px 24px;
-          grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
+          grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); align-items: start; }
   .card { background: #161b22; border: 1px solid #30363d; border-radius: 12px;
           padding: 18px; display: flex; flex-direction: column; gap: 10px; }
+  .cardhead { display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; }
+  .chev { color: #8b949e; width: 1em; transition: transform .12s; }
+  .card:not(.collapsed) .chev { transform: rotate(90deg); }
+  .card.collapsed { padding: 12px 16px; gap: 6px; }
+  .card.collapsed .cardbody { display: none; }
+  .cardbody { display: flex; flex-direction: column; gap: 10px; }
+  .badge { font-size: .7rem; padding: 1px 8px; border-radius: 999px; border: 1px solid #bb8009;
+           color: #f0c674; }
+  .badge.job { border-color: #1f6feb; color: #58a6ff; }
   .name { font-size: 1.1rem; font-weight: 600; }
-  .signals { display: flex; flex-direction: column; gap: 6px; font-size: .85rem; }
+  .signals { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: .85rem; }
   .sig { display: flex; align-items: center; gap: 8px; }
   .dot { width: 10px; height: 10px; border-radius: 50%; background: #6e7681; flex: none; }
   .dot.up { background: #3fb950; box-shadow: 0 0 8px #3fb95088; }
@@ -1291,36 +1308,54 @@ HTML = """<!doctype html>
     <div class="gwrow">
       <span class="gwname">🖥️ <b id="gwhost">gateway</b></span>
       <span class="flag idle" id="gwstate">idle</span>
+      <span class="ver" id="gwgit">git …</span>
     </div>
-    <div class="ver" id="gwgit">git …</div>
-    <div class="ver">registry — <b id="regos">…</b></div>
-    <div class="ver">registry — <b id="regapp">…</b></div>
-    <div class="ver">repos — <a id="repogw" class="repolink" target="_blank" rel="noopener">seafront-gateway</a> · <a id="reposf" class="repolink" target="_blank" rel="noopener">seafront</a></div>
-    <div class="ver" id="gwwifi">wifi …</div>
-    <div class="ver" id="gwtime">time …</div>
-    <div class="gwbtns">
-      <input id="gwtimein" type="datetime-local" step="1" style="flex:1;min-width:12em">
-      <button onclick="setGatewayTime(false)">Set gateway time</button>
-      <button onclick="setGatewayTime(true)">Set from this browser</button>
-      <span class="hint" tabindex="0" aria-label="gateway time help">?<span class="hint-pop">Without internet the gateway runs on its own clock and every box syncs to it, so the whole fleet is only as right as this clock.<br><br><b>Set from this browser</b> copies this device's clock (a phone or laptop usually has the right time). Or type a time (in this browser's time zone) and click <b>Set gateway time</b>.<br><br>The boxes are then stepped to the new time right away.</span></span>
-    </div>
-    <div class="gwbtns">
-      <button id="wifiap" onclick="setWifi('ap')">📶 Wi-Fi: Hotspot</button>
-      <button id="wificlient" onclick="setWifi('client')">🌐 Wi-Fi: Client (internet)</button>
-    </div>
-    <div class="gwbtns">
-      <input id="gwref" type="text" placeholder="seafront ref (optional)" style="flex:1;min-width:9em">
-      <span class="hint" tabindex="0" aria-label="seafront ref help">?<span class="hint-pop">Which seafront commit to build.<br><br><b>Blank</b> = the pinned release (rebuilds both images).<br><br>Or give a commit SHA, a branch (<code>main</code>), a tag, or <code>latest</code> — builds the <b>seafront image only</b> at that ref, no gateway commit needed.</span></span>
-      <button id="gwrebuild" onclick="gatewayRebuild()">Fetch git + rebuild images</button>
-    </div>
-    <div class="gwbtns">
-      <button id="gwselfupdate" onclick="gatewaySelfUpdate()">Update gateway</button>
-      <span class="hint" tabindex="0" aria-label="update gateway help">?<span class="hint-pop">Updates the gateway's own software: <code>git pull</code> the gateway repo and apply it (dashboard, Caddy, scripts). Restarts the dashboard; the page reloads when it is back. <b>Not</b> an image rebuild.</span></span>
-      <button class="danger" onclick="gatewayReboot()">Reboot gateway</button>
+    <div class="gwsecs">
+      <section class="gwsec">
+        <h2>Images in the registry</h2>
+        <div class="ver"><b id="regos">…</b></div>
+        <div class="ver"><b id="regapp">…</b></div>
+        <div class="gwbtns">
+          <input id="gwref" type="text" placeholder="seafront ref (optional)" style="flex:1;min-width:9em">
+          <span class="hint" tabindex="0" aria-label="seafront ref help">?<span class="hint-pop">Which seafront commit to build.<br><br><b>Blank</b> = the pinned release (rebuilds both images).<br><br>Or give a commit SHA, a branch (<code>main</code>), a tag, or <code>latest</code> — builds the <b>seafront image only</b> at that ref, no gateway commit needed.</span></span>
+          <button id="gwrebuild" onclick="gatewayRebuild()">Fetch git + rebuild images</button>
+        </div>
+      </section>
+      <section class="gwsec">
+        <h2>Clock</h2>
+        <div class="ver" id="gwtime">time …</div>
+        <div class="gwbtns">
+          <input id="gwtimein" type="datetime-local" step="1" style="flex:1;min-width:12em">
+          <span class="hint" tabindex="0" aria-label="gateway time help">?<span class="hint-pop">Without internet the gateway runs on its own clock and every box syncs to it, so the whole fleet is only as right as this clock.<br><br><b>Set from this browser</b> copies this device's clock (a phone or laptop usually has the right time). Or type a time (in this browser's time zone) and click <b>Set gateway time</b>.<br><br>The boxes are then stepped to the new time right away.</span></span>
+        </div>
+        <div class="gwbtns">
+          <button onclick="setGatewayTime(false)">Set gateway time</button>
+          <button onclick="setGatewayTime(true)">Set from this browser</button>
+        </div>
+      </section>
+      <section class="gwsec">
+        <h2>Network</h2>
+        <div class="ver" id="gwwifi">wifi …</div>
+        <div class="gwbtns">
+          <button id="wifiap" onclick="setWifi('ap')">📶 Wi-Fi: Hotspot</button>
+          <button id="wificlient" onclick="setWifi('client')">🌐 Wi-Fi: Client (internet)</button>
+        </div>
+      </section>
+      <section class="gwsec">
+        <h2>Gateway software</h2>
+        <div class="ver">repos: <a id="repogw" class="repolink" target="_blank" rel="noopener">seafront-gateway</a> · <a id="reposf" class="repolink" target="_blank" rel="noopener">seafront</a></div>
+        <div class="gwbtns">
+          <button id="gwselfupdate" onclick="gatewaySelfUpdate()">Update gateway</button>
+          <span class="hint" tabindex="0" aria-label="update gateway help">?<span class="hint-pop">Updates the gateway's own software: <code>git pull</code> the gateway repo and apply it (dashboard, Caddy, scripts). Restarts the dashboard; the page reloads when it is back. <b>Not</b> an image rebuild.</span></span>
+          <button class="danger" onclick="gatewayReboot()">Reboot gateway</button>
+        </div>
+      </section>
     </div>
   </div>
 </header>
-<div class="toolbar"><button onclick="addScope()">➕ Add microscope</button></div>
+<div class="toolbar"><button onclick="addScope()">➕ Add microscope</button>
+  <button onclick="collapseAll(true)">Collapse all</button>
+  <button onclick="collapseAll(false)">Expand all</button></div>
 <div class="grid" id="grid"></div>
 <footer id="foot">loading…</footer>
 
@@ -1634,7 +1669,7 @@ function closeModal() {
 async function fetchImages() {
   try {
     const d = await (await fetch('/api/images')).json();
-    IMAGES.registry = d.registry || {}; IMAGES.boxes = {};
+    IMAGES.registry = d.registry || {}; IMAGES.boxes = {}; IMAGES.at = Date.now();
     (d.boxes || []).forEach(b => IMAGES.boxes[b.name] = b);
     const ro = IMAGES.registry.os || {}, ra = IMAGES.registry.seafront || {};
     document.getElementById('regos').textContent =
@@ -1985,6 +2020,23 @@ function boxCameBack(name) {
   setTimeout(fetchImages, 3000);
   setTimeout(fetchImages, 15000);
 }
+// Collapsed cards, remembered per browser. New boxes start expanded.
+function collapsedSet() {
+  try { return new Set(JSON.parse(localStorage.getItem('collapsed') || '[]')); } catch (e) { return new Set(); }
+}
+function saveCollapsed(set) {
+  try { localStorage.setItem('collapsed', JSON.stringify([...set])); } catch (e) {}
+}
+let COLLAPSED = collapsedSet();
+function isCollapsed(name) { return COLLAPSED.has(name); }
+function toggleCard(name) {
+  if (COLLAPSED.has(name)) COLLAPSED.delete(name); else COLLAPSED.add(name);
+  saveCollapsed(COLLAPSED); refresh();
+}
+function collapseAll(on) {
+  COLLAPSED = on ? new Set(Object.keys(HOST_UP)) : new Set();
+  saveCollapsed(COLLAPSED); refresh();
+}
 async function refresh() {
   let data;
   try { data = await (await fetch('/api/status')).json(); }
@@ -1998,7 +2050,8 @@ async function refresh() {
   for (const m of data) {
     const url = `http://${location.hostname}:${m.proxy_port}/`;
     const card = document.createElement('div');
-    card.className = 'card';
+    const collapsed = isCollapsed(m.name);
+    card.className = 'card' + (collapsed ? ' collapsed' : '');
     const hs = m.host_up ? 'up' : 'down', ss = m.service_up ? 'up' : 'down';
     const img = IMAGES.boxes[m.name] || {};
     const osd = img.os || {}, appd = img.seafront || {};
@@ -2012,13 +2065,25 @@ async function refresh() {
     let jobLine = '';
     if (jobRunning) jobLine = `<div class="ver jobrun">⏳ ${job.kind}… <button class="linkbtn" onclick="viewJob('${m.name}')">view log</button></div>`;
     else if (job && job.rc != null && job.rc !== 0) jobLine = `<div class="ver stale">⚠ ${job.kind} failed (exit ${job.rc}) <button class="linkbtn" onclick="viewJob('${m.name}')">log</button></div>`;
+    // uptime ticks locally between the 30 s image polls; a cached read is stale_seconds older
+    const up = img.uptime_s == null ? null
+      : img.uptime_s + (img.stale_seconds || 0) + (Date.now() - (IMAGES.at || Date.now())) / 1000;
+    let badges = '';
+    if (collapsed) {
+      if (jobRunning) badges += `<span class="badge job">⏳ ${job.kind}</span>`;
+      if (issues.length) badges += `<span class="badge" title="${esc(issues.join(' · '))}">⚠ ${issues.length}</span>`;
+      if (osStale || appStale || (osd.etc_drift && osd.etc_drift.length)) badges += '<span class="badge">update</span>';
+    }
     card.innerHTML = `
-      <div class="name">${m.name}</div>
+      <div class="cardhead" onclick="toggleCard('${m.name}')">
+        <span class="chev">▸</span><span class="name">${m.name}</span>${badges}
+      </div>
       <div class="signals">
-        <div class="sig"><span class="dot ${hs}"></span>Computer: ${m.host_up ? 'online' : 'offline'}${m.host_up && img.uptime_s != null ? ' <span class="muted">· up ' + dur(img.uptime_s) + '</span>' : ''}</div>
+        <div class="sig"><span class="dot ${hs}"></span>Computer: ${m.host_up ? 'online' : 'offline'}${m.host_up && up != null ? ' <span class="muted">· up ' + dur(up) + '</span>' : ''}</div>
         <div class="sig"><span class="dot ${ss}"></span>seafront: ${m.service_up ? 'running' : 'down'}</div>
       </div>
-      <div class="meta">${m.host}:${m.seafront_port} · via gateway :${m.proxy_port}</div>
+      <div class="meta">${m.host}:${m.seafront_port} · <a class="repolink" href="${url}">via gateway :${m.proxy_port}</a></div>
+      <div class="cardbody">
       <div class="ver">${osLine(osd, IMAGES.registry.os)}</div>
       <div class="ver">${appLine(appd, IMAGES.registry.seafront)}</div>
       ${img.stale_seconds ? `<div class="ver stale">⏳ last read failed — showing values from ${img.stale_seconds}s ago</div>` : ''}
@@ -2036,6 +2101,7 @@ async function refresh() {
         <button class="danger" style="grid-column:1/3" ${jr}
           onclick="act('${m.name}','reboot','Reboot ${m.name} (${m.host})? This interrupts anything running on it.')">
           Reboot computer</button>
+      </div>
       </div>`;
     grid.appendChild(card);
   }
