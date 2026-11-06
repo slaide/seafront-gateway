@@ -339,6 +339,8 @@ def _parse_clock(chrony_out: str, box_date: str, returned_at: float) -> dict:
     # "Reference ID    : 0A0A0045 (10.10.0.69)"; "Leap status     : Normal"
     refid, _, rest = fields.get("Reference ID", "").partition(" ")
     clock["server"] = rest.strip("() ") or None
+    if refid == "7F7F0101":   # chrony's `local` reference: serving its own clock
+        clock["server"] = "local clock"
     clock["synced"] = refid not in ("", "00000000") and fields.get("Leap status") == "Normal"
     return clock
 
@@ -733,6 +735,7 @@ async def gateway_info() -> JSONResponse:
         _git("remote", "get-url", "origin"),
     )
     return JSONResponse({
+        "time": await _gateway_time(),
         "host": GW_HOST,
         "git": {
             "head": head,
@@ -746,6 +749,55 @@ async def gateway_info() -> JSONResponse:
         },
         "rebuild": _job_status(GW_JOB),
     })
+
+
+async def _gateway_time() -> dict:
+    """Gateway wall clock + chrony's view of it. Offline, chrony serves this clock to the
+    whole fleet (`local stratum 10`), so this is the time every box ends up with."""
+    try:
+        _rc, tracking, _ = await _run_local(["chronyc", "-n", "tracking"], timeout=5.0)
+    except HTTPException:
+        tracking = ""
+    try:
+        _rc, tz, _ = await _run_local(["timedatectl", "show", "-p", "Timezone", "--value"],
+                                      timeout=5.0)
+    except HTTPException:
+        tz = ""
+    c = _parse_clock(tracking, "", 0.0)
+    return {"epoch": time.time(), "tz": tz.strip() or None,
+            "server": c["server"], "synced": c["synced"]}
+
+
+class TimeIn(BaseModel):
+    epoch: float   # unix seconds, from the browser's clock or a typed-in time
+
+
+@app.post("/api/gateway/time")
+async def gateway_set_time(t: TimeIn) -> JSONResponse:
+    """Set the gateway clock (scripts/set-time.sh, self-elevating via the gateway sudoers
+    rule), then step every box to it. Without the step, chrony on the boxes would slew
+    toward the new time at <=83 ms/s (makestep only applies at chronyd start), so a
+    10-minute correction would take ~2 h."""
+    rc, out, err = await _run_local(
+        [str(ROOT / "scripts" / "set-time.sh"), f"{t.epoch:.3f}"], timeout=15.0)
+    if rc:
+        raise HTTPException(502, f"set-time failed: {(err or out).strip()}")
+
+    async def step(name: str) -> tuple[str, str]:
+        # makestep only steps when the box has a measurement of the gateway's new time;
+        # `burst` gets one immediately (no sudo needed for it), then step.
+        try:
+            rc, o, e = await _ssh(
+                name, ["chronyc burst 4/4 >/dev/null 2>&1; sleep 6; "
+                       "sudo -n /usr/bin/chronyc makestep"], timeout=20.0)
+        except HTTPException as ex:
+            return name, f"unreachable ({ex.detail})"
+        if rc:
+            return name, "not allowed yet (box OS predates the chronyc sudoers rule; it will slew instead)"
+        return name, "stepped"
+
+    boxes = dict(await asyncio.gather(*[step(m["name"]) for m in scopes()]))
+    return JSONResponse({"ok": True, "gateway": out.strip(), "boxes": boxes})
 
 
 @app.post("/api/gateway/update")
@@ -1080,6 +1132,13 @@ HTML = """<!doctype html>
     <div class="ver">registry — <b id="regapp">…</b></div>
     <div class="ver">repos — <a id="repogw" class="repolink" target="_blank" rel="noopener">seafront-gateway</a> · <a id="reposf" class="repolink" target="_blank" rel="noopener">seafront</a></div>
     <div class="ver" id="gwwifi">wifi …</div>
+    <div class="ver" id="gwtime">time …</div>
+    <div class="gwbtns">
+      <input id="gwtimein" type="datetime-local" step="1" style="flex:1;min-width:12em">
+      <button onclick="setGatewayTime(false)">Set gateway time</button>
+      <button onclick="setGatewayTime(true)">Set from this browser</button>
+      <span class="hint" tabindex="0" aria-label="gateway time help">?<span class="hint-pop">Without internet the gateway runs on its own clock and every box syncs to it, so the whole fleet is only as right as this clock.<br><br><b>Set from this browser</b> copies this device's clock (a phone or laptop usually has the right time). Or type a time (in this browser's time zone) and click <b>Set gateway time</b>.<br><br>The boxes are then stepped to the new time right away.</span></span>
+    </div>
     <div class="gwbtns">
       <button id="wifiap" onclick="setWifi('ap')">📶 Wi-Fi: Hotspot</button>
       <button id="wificlient" onclick="setWifi('client')">🌐 Wi-Fi: Client (internet)</button>
@@ -1366,9 +1425,57 @@ async function reattachJobs() {
   refresh();
 }
 
+// Gateway clock = browser clock + GW_CLOCK.offset_ms (measured at each fetchGateway).
+const GW_CLOCK = { offset_ms: null, tz: null, server: null, synced: false };
+function gwTimeTick() {
+  const el = document.getElementById('gwtime');
+  if (GW_CLOCK.offset_ms == null) { el.textContent = 'time …'; return; }
+  const now = new Date(Date.now() + GW_CLOCK.offset_ms);
+  let shown;
+  try {
+    shown = now.toLocaleString('sv-SE', { timeZone: GW_CLOCK.tz || undefined }) + (GW_CLOCK.tz ? ' ' + GW_CLOCK.tz : '');
+  } catch (e) { shown = now.toISOString(); }
+  const d = GW_CLOCK.offset_ms / 1000, ad = Math.abs(d);
+  const delta = (d >= 0 ? '+' : '') + (ad < 1 ? (d * 1000).toFixed(0) + ' ms' : d.toFixed(1) + ' s');
+  const src = !GW_CLOCK.synced ? 'not synced'
+            : GW_CLOCK.server === 'local clock' ? 'own clock (no internet time)'
+            : 'synced to ' + GW_CLOCK.server;
+  el.innerHTML = 'time ' + shown + ' · ' + src + ' · <span class="' + (ad > 2 ? 'stale' : 'ok') + '">' + delta + ' vs this browser</span>';
+}
+async function setGatewayTime(fromBrowser) {
+  let epoch;
+  if (fromBrowser) epoch = Date.now() / 1000;
+  else {
+    const v = document.getElementById('gwtimein').value;
+    if (!v) { toast('enter a date + time first'); return; }
+    epoch = new Date(v).getTime() / 1000;   // datetime-local is read in the browser's zone
+    if (isNaN(epoch)) { toast('invalid time'); return; }
+  }
+  const target = new Date(epoch * 1000).toLocaleString('sv-SE');
+  const warn = (GW_CLOCK.synced && GW_CLOCK.server && GW_CLOCK.server !== 'local clock')
+    ? '\\n\\nNOTE: the gateway is currently synced to an internet time server (' + GW_CLOCK.server + '); that is normally more accurate than this.' : '';
+  if (!confirm('Set the gateway clock to ' + target + ' (this browser\\'s time zone) and step every box to it?' + warn)) return;
+  if (fromBrowser) epoch = Date.now() / 1000;   // re-read: the confirm dialog took time
+  try {
+    const r = await fetch('/api/gateway/time', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                                body: JSON.stringify({epoch})});
+    const j = await r.json();
+    if (!r.ok) { alert('Setting the time failed:\\n' + (j.detail || r.status)); return; }
+    const boxes = Object.entries(j.boxes || {}).map(([n, s]) => n + ': ' + s).join('\\n');
+    alert(j.gateway + (boxes ? '\\n\\n' + boxes : ''));
+  } catch (e) { alert('Setting the time failed: ' + e); }
+  fetchGateway(); fetchImages();
+}
 async function fetchGateway() {
   try {
+    const t0 = Date.now();
     const g = await (await fetch('/api/gateway')).json();
+    const t1 = Date.now();
+    if (g.time) {
+      Object.assign(GW_CLOCK, { offset_ms: g.time.epoch * 1000 - (t0 + t1) / 2, tz: g.time.tz,
+                                server: g.time.server, synced: g.time.synced });
+      gwTimeTick();
+    }
     document.getElementById('gwhost').textContent = g.host || 'gateway';
     const gi = g.git || {};
     let s = gi.head ? (gi.head + (gi.subject ? ' · ' + gi.subject : '')) : '?';
@@ -1660,6 +1767,7 @@ reattachJobs();
 setInterval(refresh, 1000);
 setInterval(fetchImages, 30000);   // image info needs SSH per box — poll gently
 setInterval(fetchGateway, 15000);  // gateway git/rebuild state (local, cheap)
+setInterval(gwTimeTick, 1000);     // gateway clock display ticks locally between fetches
 setInterval(fetchWifi, 15000);     // gateway Wi-Fi mode + internet reachability
 </script>
 </body>

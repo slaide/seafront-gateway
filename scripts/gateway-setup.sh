@@ -82,13 +82,13 @@ echo "==> dashboard sudoers (reboot + the self-elevating fleet scripts)"
 # no sudo (pharmbio owns $DIR and its own podman storage) — but they DO need pharmbio's
 # user runtime dir kept alive (enable-linger above + the unit's XDG_RUNTIME_DIR). What
 # else needs root:
-# rebooting the host, applying config (write /etc/caddy, restart caddy, firewalld), and
-# toggling Wi-Fi. apply-config.sh and wifi-mode.sh self-elevate; grant pharmbio those
+# rebooting the host, applying config (write /etc/caddy, restart caddy, firewalld),
+# toggling Wi-Fi, and setting the clock (set-time.sh). apply-config.sh and wifi-mode.sh self-elevate; grant pharmbio those
 # two scripts (bare + with args) passwordless so the non-tty dashboard can run them —
 # and nothing else. Args are matched with a trailing '*'; avoid ':' in any argument
 # (SSIDs/passwords), which sudoers parses as a host/command separator.
 sudo install -m 0440 /dev/stdin /etc/sudoers.d/seafront-gateway <<EOF
-pharmbio ALL=(root) NOPASSWD: /usr/sbin/reboot, /usr/bin/systemctl reboot, $DIR/scripts/apply-config.sh, $DIR/scripts/apply-config.sh *, $DIR/scripts/wifi-mode.sh, $DIR/scripts/wifi-mode.sh *, $DIR/scripts/self-update.sh
+pharmbio ALL=(root) NOPASSWD: /usr/sbin/reboot, /usr/bin/systemctl reboot, $DIR/scripts/apply-config.sh, $DIR/scripts/apply-config.sh *, $DIR/scripts/wifi-mode.sh, $DIR/scripts/wifi-mode.sh *, $DIR/scripts/self-update.sh, $DIR/scripts/set-time.sh *
 EOF
 sudo visudo -cf /etc/sudoers.d/seafront-gateway
 
