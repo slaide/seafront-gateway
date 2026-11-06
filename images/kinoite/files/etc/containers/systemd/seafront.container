@@ -31,13 +31,9 @@ Environment=SEAFRONT_MICROSCOPE=mocroscope
 # node present then but gone at the next start (renumbered) makes podman refuse to start
 # ("stat /dev/ttyACM1: no such file or directory").
 #
-# SELinux: run the container unconfined (label=disable), same as seafront-run. Confined
-# (container_t), pyserial's glob of the bind-mounted host /dev came back empty ("no ports
-# found") while the identical command under seafront-run listed /dev/ttyACM0. The
-# `container_use_devices` boolean (seafront-hardware-prep.service) lets a confined
-# container open device nodes, but that is not enough for listing the host /dev.
+# SELinux: host device nodes keep their labels; seafront-hardware-prep.service sets the
+# `container_use_devices` boolean before seafront starts, which lets the container open them.
 # ---------------------------------------------------------------------------
-SecurityLabelDisable=true
 Volume=/dev:/dev
 # NOTE the quotes: each cgroup-rule value contains spaces, and quadlet splits
 # PodmanArgs on whitespace — unquoted, the unit parses into garbage.
