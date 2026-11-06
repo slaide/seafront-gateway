@@ -323,6 +323,26 @@ def _parse_drift(text: str) -> list[str] | None:
     return lines[:-1]
 
 
+def _parse_clock(chrony_out: str, box_date: str, returned_at: float) -> dict:
+    """Box clock vs the gateway's. `offset_s` = box wall clock minus gateway wall clock,
+    measured directly (box `date` vs the time the SSH call returned), so it is correct even
+    when chrony is misconfigured; it overestimates by the SSH return latency (~10-100 ms).
+    `server`/`synced` are chrony's own view: which NTP source it follows and whether it
+    is locked to it (refid 0 / "Not synchronised" means free-running)."""
+    clock: dict = {"offset_s": None, "server": None, "synced": False}
+    try:
+        clock["offset_s"] = round(float(box_date.strip()) - returned_at, 3)
+    except ValueError:
+        pass
+    fields = {k.strip(): v.strip() for k, _, v in
+              (l.partition(":") for l in chrony_out.splitlines()) if v}
+    # "Reference ID    : 0A0A0045 (10.10.0.69)"; "Leap status     : Normal"
+    refid, _, rest = fields.get("Reference ID", "").partition(" ")
+    clock["server"] = rest.strip("() ") or None
+    clock["synced"] = refid not in ("", "00000000") and fields.get("Leap status") == "Normal"
+    return clock
+
+
 # List the profile names in the box's config.json (no sudo — pharmbio owns it). Single
 # argv element / single-quoted python so ssh's space-join + remote re-parse keep it intact.
 _LIST_PROFILES_CMD = (
@@ -347,6 +367,13 @@ _BOX_IMAGES_CMD = (
     # image-owned /etc files that differ from the image (bootc keeps local edits across
     # upgrades); rc line distinguishes "no drift" from "check unavailable" (older image)
     "sudo -n /usr/bin/seafront-etc-sync --check 2>/dev/null; echo \"rc=$?\""
+    "; echo '<<<SPLIT>>>'; "
+    # clock: chrony's view (which server, synced?) + the box's wall clock, read LAST so it
+    # is taken as close as possible to when the SSH call returns (see _parse_clock)
+    # (not `-c`: chrony 4.9 prints nothing in CSV mode over this ssh, still exit 0)
+    "chronyc -n tracking 2>/dev/null"
+    "; echo '<<<SPLIT>>>'; "
+    "date +%s.%N"
 )
 
 
@@ -363,6 +390,7 @@ async def _box_images(name: str) -> dict:
         _rc, out, _err = await _ssh(name, [_BOX_IMAGES_CMD], timeout=15.0)
     except HTTPException:
         out = ""
+    returned_at = time.time()   # gateway wall clock, compared with the box's `date`
     # The command echoes '<<<SPLIT>>>' between sections unconditionally, so its presence
     # proves the SSH actually ran the command — vs. a reset/timeout that returns nothing.
     # On a real failure, serve the last good read (flagged with its age) rather than
@@ -382,11 +410,14 @@ async def _box_images(name: str) -> dict:
     prof_part = parts[2] if len(parts) > 2 else ""
     active_part = parts[3] if len(parts) > 3 else ""
     drift_part = parts[4] if len(parts) > 4 else ""
+    chrony_part = parts[5] if len(parts) > 5 else ""
+    date_part = parts[6] if len(parts) > 6 else ""
     profiles = [p.strip() for p in prof_part.splitlines() if p.strip()]
     os_info = _parse_bootc(os_part)
     os_info["etc_drift"] = _parse_drift(drift_part)
     result = {"name": name, "os": os_info, "seafront": _parse_app(app_part),
-              "microscopes": profiles, "active": active_part.strip() or None}
+              "microscopes": profiles, "active": active_part.strip() or None,
+              "clock": _parse_clock(chrony_part, date_part, returned_at)}
     _LAST_BOX_IMAGES[name] = (copy.deepcopy(result), time.monotonic())
     return {**result, "stale_seconds": 0}
 
@@ -1160,6 +1191,16 @@ function osLine(o, reg) {
     drift = '<br><span class="stale">⚠ /etc differs from image (reboot or <code>sudo seafront-etc-sync</code>): ' + o.etc_drift.join(', ') + '</span>';
   return 'OS ' + v + (t ? ' · ' + t : '') + ' · ' + short(o.digest) + badge + drift;
 }
+// Box clock vs gateway clock. Warn past 1 s: SSH latency alone stays well below that.
+function clockLine(c) {
+  if (!c || c.offset_s == null) return '<span class="muted">clock: unknown</span>';
+  const off = c.offset_s, abs = Math.abs(off);
+  const txt = abs < 1 ? (off >= 0 ? '+' : '') + (off * 1000).toFixed(0) + ' ms'
+                      : (off >= 0 ? '+' : '') + off.toFixed(1) + ' s';
+  const src = c.synced ? 'synced to ' + c.server : '<b>not synced</b>' + (c.server ? ' (' + c.server + ')' : '');
+  const cls = (abs >= 1 || !c.synced) ? 'stale' : 'ok';
+  return '<span class="' + cls + '">clock ' + txt + ' vs gateway · ' + src + '</span>';
+}
 function appLine(a, reg) {
   if (!a || a.present === false) return '<span class="muted">seafront image: not present</span>';
   const t = ftime(a.created);
@@ -1588,6 +1629,7 @@ async function refresh() {
       <div class="meta">${m.host}:${m.seafront_port} · via gateway :${m.proxy_port}</div>
       <div class="ver">${osLine(osd, IMAGES.registry.os)}</div>
       <div class="ver">${appLine(appd, IMAGES.registry.seafront)}</div>
+      <div class="ver">${clockLine(img.clock)}</div>
       ${img.stale_seconds ? `<div class="ver stale">⏳ last read failed — showing values from ${img.stale_seconds}s ago</div>` : ''}
       ${jobLine}
       <div class="btns">
