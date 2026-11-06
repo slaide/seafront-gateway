@@ -34,6 +34,7 @@ import ipaddress
 import json
 import os
 import pathlib
+import re
 import shlex
 import sys
 import time
@@ -572,6 +573,7 @@ async def images() -> JSONResponse:
             asyncio.gather(_registry_image(client, OS_REPO), _registry_image(client, APP_REPO)),
             asyncio.gather(*[_box_images(m["name"]) for m in scopes()]),
         )
+    reg_os["vs_checkout"] = await _os_image_vs_checkout(reg_os.get("revision"))
     for b in boxes:
         osd, appd = b["os"], b["seafront"]
         rd = reg_os.get("digest")
@@ -878,13 +880,18 @@ async def _internet_ok() -> bool:
 
 @app.get("/api/gateway")
 async def gateway_info() -> JSONResponse:
-    head, subject, dirty, behind, origin = await asyncio.gather(
+    head, subject, dirty, behind, origin, incoming = await asyncio.gather(
         _git("rev-parse", "--short", "HEAD"),
         _git("log", "-1", "--pretty=%s"),
         _git("status", "--porcelain"),
         _git("rev-list", "--count", "HEAD..@{u}"),   # as of last fetch (no network here)
         _git("remote", "get-url", "origin"),
+        _git("log", "-n", "10", "--format=%h %s", "HEAD..@{u}"),
     )
+    try:
+        fetched_at = (ROOT / ".git" / "FETCH_HEAD").stat().st_mtime
+    except OSError:
+        fetched_at = None
     return JSONResponse({
         "time": await _gateway_time(),
         "host": GW_HOST,
@@ -893,7 +900,10 @@ async def gateway_info() -> JSONResponse:
             "subject": subject,
             "dirty": bool(dirty.strip()),
             "behind": int(behind) if behind.isdigit() else None,
+            "incoming": [l for l in incoming.splitlines() if l.strip()] if behind.isdigit() else [],
+            "fetched_at": fetched_at,
         },
+        "seafront": {"pinned": _pinned_seafront_ref(), "remote": SEAFRONT_REMOTE or None},
         "repos": {
             "gateway": _browse_url(origin) if origin.startswith(("http", "git@")) else None,
             "seafront": SEAFRONT_REPO_URL,
@@ -953,30 +963,85 @@ async def gateway_set_time(t: TimeIn) -> JSONResponse:
     return JSONResponse({"ok": True, "gateway": out.strip(), "boxes": boxes})
 
 
-@app.post("/api/gateway/update")
-async def gateway_update(seafront_ref: str = "") -> JSONResponse:
-    """Fetch latest git + rebuild images into the registry. Streamed job; updates the
-    registry only — no box is touched until it is rolled.
+_NO_NET = ("gateway has no internet (Wi-Fi in hotspot/AP mode?). "
+           "Switch Wi-Fi to client mode first.")
 
-    seafront_ref (optional): build the seafront app image at this ref — a commit, branch,
-    tag, or "latest" — instead of the pinned default, and skip the (slow) OS rebuild. Lets
-    you test a seafront build without bumping+committing the pin. Blank = the pinned commit
-    + both images (the reproducible release path)."""
-    # Rebuilding pulls from the internet. If the gateway's single Wi-Fi radio is in
-    # AP/hotspot mode it has no upstream, so fail fast with the fix instead of hanging.
+
+@app.post("/api/gateway/build")
+async def gateway_build(target: str, seafront_ref: str = "") -> JSONResponse:
+    """Build ONE image from the current checkout and push it to the registry. Streamed job;
+    no git pull (that is /api/gateway/self-update) and no box is touched.
+
+    target=seafront: the app image at `seafront_ref` (commit, branch, tag, or "latest"),
+    blank = the commit pinned in build-images.sh. target=os: the OS image."""
+    # Both builds pull from the internet (seafront clone, base/dnf for the OS). Fail fast
+    # with the fix instead of hanging when the Wi-Fi radio is in AP mode.
     if not await _internet_ok():
-        raise HTTPException(409, "gateway has no internet (Wi-Fi in hotspot/AP mode?). "
-                                 "Switch Wi-Fi to client mode, then rebuild.")
-    ref = seafront_ref.strip()
-    if ref:
-        # testing a specific seafront build: seafront image only, at the given ref
-        build = f"SEAFRONT_REF={shlex.quote(ref)} bash scripts/build-images.sh --seafront"
+        raise HTTPException(409, _NO_NET)
+    if target == "seafront":
+        ref = seafront_ref.strip()
+        env = f"SEAFRONT_REF={shlex.quote(ref)} " if ref else ""
+        build = f"{env}bash scripts/build-images.sh --seafront"
+    elif target == "os":
+        build = "bash scripts/build-images.sh --os"
     else:
-        # reproducible release: pinned commit, both images
-        build = "bash scripts/build-images.sh --os --seafront"
-    cmd = ["bash", "-lc",
-           f"cd {ROOT} && git fetch --all --prune && git pull --ff-only && {build}"]
-    return _start_job(GW_JOB, "gateway-update", cmd)
+        raise HTTPException(400, "target must be 'seafront' or 'os'")
+    return _start_job(GW_JOB, f"build {target}", ["bash", "-lc", f"cd {ROOT} && {build}"])
+
+
+@app.post("/api/gateway/fetch")
+async def gateway_fetch() -> JSONResponse:
+    """`git fetch` the gateway checkout: shows what a pull would bring, changes nothing."""
+    if not await _internet_ok():
+        raise HTTPException(409, _NO_NET)
+    try:
+        out = await asyncio.wait_for(_git("fetch", "--all", "--prune"), timeout=60.0)
+    except asyncio.TimeoutError:
+        raise HTTPException(504, "git fetch timed out")
+    return JSONResponse({"ok": True, "log": out})
+
+
+def _pinned_seafront_ref() -> str | None:
+    """The seafront commit build-images.sh builds by default (its REF= line)."""
+    try:
+        m = re.search(r'REF="\$\{SEAFRONT_REF:-([0-9a-fA-F]+)\}"',
+                      (ROOT / "scripts" / "build-images.sh").read_text())
+    except OSError:
+        return None
+    return m.group(1) if m else None
+
+
+# Last `git ls-remote` of the seafront repo's default branch: {"sha", "at"}. In memory
+# only; the gateway has no seafront checkout (the image build clones it).
+SEAFRONT_REMOTE: dict = {}
+
+
+@app.post("/api/seafront/fetch")
+async def seafront_fetch() -> JSONResponse:
+    """Look up the seafront repo's current default-branch commit (no clone, no build)."""
+    if not await _internet_ok():
+        raise HTTPException(409, _NO_NET)
+    if not SEAFRONT_REPO_URL:
+        raise HTTPException(500, "seafront repo URL not found in images/seafront/Containerfile")
+    rc, out, err = await _run_local(["git", "ls-remote", SEAFRONT_REPO_URL + ".git", "HEAD"],
+                                    timeout=30.0)
+    sha = out.split()[0] if rc == 0 and out.strip() else None
+    if not sha:
+        raise HTTPException(502, f"git ls-remote failed: {(err or out).strip()[-500:]}")
+    SEAFRONT_REMOTE.update(sha=sha, at=time.time())
+    return JSONResponse(SEAFRONT_REMOTE)
+
+
+async def _os_image_vs_checkout(rev: str | None) -> str:
+    """Has images/kinoite changed between the commit the registry OS image was built from
+    and the checkout? 'same' | 'changed' | 'unknown' (no label, -dirty build, gone commit)."""
+    if not rev or not re.fullmatch(r"[0-9a-f]{7,40}", rev):
+        return "unknown"
+    proc = await asyncio.create_subprocess_exec(
+        "git", "-C", str(ROOT), "diff", "--quiet", rev, "HEAD", "--", "images/kinoite",
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+    rc = await proc.wait()
+    return {0: "same", 1: "changed"}.get(rc, "unknown")
 
 
 @app.get("/api/gateway/job")
@@ -1170,7 +1235,7 @@ HTML = """<!doctype html>
   .gateway { margin-top: 14px; padding: 14px 16px; background: #161b22; border: 1px solid #30363d;
              border-radius: 12px; display: flex; flex-direction: column; gap: 12px; }
   .gwrow { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-  .gwsecs { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+  .gwsecs { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
   .gwsec { background: #0e1116; border: 1px solid #21262d; border-radius: 10px; padding: 10px 12px;
            display: flex; flex-direction: column; gap: 6px; }
   .gwsec h2 { margin: 0 0 2px; font-size: .7rem; font-weight: 700; letter-spacing: .08em;
@@ -1312,13 +1377,35 @@ HTML = """<!doctype html>
     </div>
     <div class="gwsecs">
       <section class="gwsec">
-        <h2>Images in the registry</h2>
-        <div class="ver"><b id="regos">…</b></div>
-        <div class="ver"><b id="regapp">…</b></div>
+        <h2>Gateway software</h2>
+        <div class="ver" id="gwsync">…</div>
+        <div class="ver muted" id="gwincoming" style="white-space:pre-wrap"></div>
+        <div class="ver">repos: <a id="repogw" class="repolink" target="_blank" rel="noopener">seafront-gateway</a> · <a id="reposf" class="repolink" target="_blank" rel="noopener">seafront</a></div>
         <div class="gwbtns">
-          <input id="gwref" type="text" placeholder="seafront ref (optional)" style="flex:1;min-width:9em">
-          <span class="hint" tabindex="0" aria-label="seafront ref help">?<span class="hint-pop">Which seafront commit to build.<br><br><b>Blank</b> = the pinned release (rebuilds both images).<br><br>Or give a commit SHA, a branch (<code>main</code>), a tag, or <code>latest</code> — builds the <b>seafront image only</b> at that ref, no gateway commit needed.</span></span>
-          <button id="gwrebuild" onclick="gatewayRebuild()">Fetch git + rebuild images</button>
+          <button class="needsnet" onclick="gatewayFetch()">Fetch</button>
+          <button class="needsnet" id="gwselfupdate" onclick="gatewaySelfUpdate()">Pull + apply</button>
+          <span class="hint" tabindex="0" aria-label="update gateway help">?<span class="hint-pop"><b>Fetch</b> checks GitHub for new gateway commits and lists them. Nothing changes.<br><br><b>Pull + apply</b> pulls them and applies the gateway's own software (dashboard, Caddy, scripts, firewall). Restarts the dashboard; the page reloads when it is back. Does <b>not</b> build images.</span></span>
+          <button class="danger" onclick="gatewayReboot()">Reboot gateway</button>
+        </div>
+      </section>
+      <section class="gwsec">
+        <h2>seafront image</h2>
+        <div class="ver">registry: <b id="regapp">…</b></div>
+        <div class="ver" id="sfsrc">pinned …</div>
+        <div class="gwbtns">
+          <button class="needsnet" onclick="seafrontFetch()">Fetch</button>
+          <input id="gwref" type="text" placeholder="ref (blank = pinned)" style="flex:1;min-width:9em">
+          <span class="hint" tabindex="0" aria-label="seafront ref help">?<span class="hint-pop"><b>Fetch</b> looks up the newest commit on seafront's default branch. Nothing is built.<br><br><b>Build</b> builds the seafront image and pushes it to the registry. The ref is the seafront commit to build: <b>blank</b> = the commit pinned in <code>build-images.sh</code>, or a SHA, a branch (<code>main</code>), a tag, or <code>latest</code>.<br><br>No box changes until you click <b>Update seafront</b> on it.</span></span>
+        </div>
+        <div class="gwbtns"><button class="needsnet buildbtn" onclick="gatewayBuild('seafront')">Build seafront image</button></div>
+      </section>
+      <section class="gwsec">
+        <h2>OS image</h2>
+        <div class="ver">registry: <b id="regos">…</b></div>
+        <div class="ver" id="ossrc">…</div>
+        <div class="gwbtns">
+          <button class="needsnet buildbtn" onclick="gatewayBuild('os')">Build OS image</button>
+          <span class="hint" tabindex="0" aria-label="OS build help">?<span class="hint-pop">Builds the box OS from <code>images/kinoite</code> in the gateway's <b>current checkout</b> (pull first under Gateway software to get new commits) and pushes it to the registry.<br><br>No box changes until you click <b>Update OS</b> on it.</span></span>
         </div>
       </section>
       <section class="gwsec">
@@ -1339,15 +1426,6 @@ HTML = """<!doctype html>
         <div class="gwbtns">
           <button id="wifiap" onclick="setWifi('ap')">📶 Wi-Fi: Hotspot</button>
           <button id="wificlient" onclick="setWifi('client')">🌐 Wi-Fi: Client (internet)</button>
-        </div>
-      </section>
-      <section class="gwsec">
-        <h2>Gateway software</h2>
-        <div class="ver">repos: <a id="repogw" class="repolink" target="_blank" rel="noopener">seafront-gateway</a> · <a id="reposf" class="repolink" target="_blank" rel="noopener">seafront</a></div>
-        <div class="gwbtns">
-          <button id="gwselfupdate" onclick="gatewaySelfUpdate()">Update gateway</button>
-          <span class="hint" tabindex="0" aria-label="update gateway help">?<span class="hint-pop">Updates the gateway's own software: <code>git pull</code> the gateway repo and apply it (dashboard, Caddy, scripts). Restarts the dashboard; the page reloads when it is back. <b>Not</b> an image rebuild.</span></span>
-          <button class="danger" onclick="gatewayReboot()">Reboot gateway</button>
         </div>
       </section>
     </div>
@@ -1673,10 +1751,16 @@ async function fetchImages() {
     (d.boxes || []).forEach(b => IMAGES.boxes[b.name] = b);
     const ro = IMAGES.registry.os || {}, ra = IMAGES.registry.seafront || {};
     document.getElementById('regos').textContent =
-      'OS ' + (ro.error ? '(error)' : ((ro.version || short(ro.digest)) + (ftime(ro.created) ? ' · ' + ftime(ro.created) : '') + ' · ' + short(ro.digest)));
+      (ro.error ? '(error)' : ((ro.version || short(ro.digest)) + (ftime(ro.created) ? ' · ' + ftime(ro.created) : '') + ' · ' + short(ro.digest)));
     document.getElementById('regapp').textContent =
-      'seafront' + rev(ra.revision) + ' ' + (ra.error ? '(error)' : ((ftime(ra.created) ? ftime(ra.created) + ' · ' : '') + short(ra.digest)));
-  } catch (e) { document.getElementById('regos').textContent = 'OS (unreachable)'; }
+      rev(ra.revision).trim() + ' ' + (ra.error ? '(error)' : ((ftime(ra.created) ? ftime(ra.created) + ' · ' : '') + short(ra.digest)));
+    const vc = ro.vs_checkout, os_ = document.getElementById('ossrc');
+    os_.textContent = vc === 'same' ? 'checkout has no OS changes since this build'
+      : vc === 'changed' ? 'images/kinoite changed since this build: rebuild to ship it'
+      : 'cannot compare with the checkout';
+    os_.className = 'ver ' + (vc === 'changed' ? 'stale' : 'muted');
+    GW_REGAPP_REV = ra.revision || null; renderSeafrontSrc();
+  } catch (e) { document.getElementById('regos').textContent = '(unreachable)'; }
   refresh();
 }
 
@@ -1798,28 +1882,77 @@ async function fetchGateway() {
     document.getElementById('gwhost').textContent = g.host || 'gateway';
     const gi = g.git || {};
     let s = gi.head ? (gi.head + (gi.subject ? ' · ' + gi.subject : '')) : '?';
-    if (gi.behind) s += '  · ' + gi.behind + ' behind origin';
     if (gi.dirty) s += '  · ⚠ dirty';
     document.getElementById('gwgit').textContent = 'git ' + s;
     const rp = g.repos || {};
     if (rp.gateway) document.getElementById('repogw').href = rp.gateway;
     if (rp.seafront) document.getElementById('reposf').href = rp.seafront;
-    const rebuilding = !!(g.rebuild && g.rebuild.running);
+    const job = g.rebuild || {};
+    GW_BUILDING = !!job.running;
     const flag = document.getElementById('gwstate');
-    flag.textContent = rebuilding ? 'rebuilding' : 'idle';
-    flag.className = 'flag ' + (rebuilding ? 'rebuilding' : 'idle');
-    const rb = document.getElementById('gwrebuild');
-    rb.dataset.rebuilding = rebuilding ? '1' : '';
-    updateRebuildBtn();
+    flag.textContent = GW_BUILDING ? (job.kind || 'building') + '…' : 'idle';
+    flag.className = 'flag ' + (GW_BUILDING ? 'rebuilding' : 'idle');
+    const fa = gi.fetched_at ? 'fetched ' + ago(gi.fetched_at) : 'never fetched';
+    const sync = document.getElementById('gwsync');
+    sync.textContent = 'checkout ' + (gi.head || '?') + ' · ' +
+      (gi.behind ? gi.behind + ' commit(s) to pull' : 'up to date with origin') + ' (' + fa + ')';
+    sync.className = 'ver' + (gi.behind ? ' stale' : '');
+    document.getElementById('gwincoming').textContent = (gi.incoming || []).join('\\n');
+    GW_SF = g.seafront || {}; renderSeafrontSrc();
+    updateNetBtns();
   } catch (e) { /* leave last-known */ }
 }
-// Rebuild is blocked while a rebuild runs OR while the gateway has no internet (Wi-Fi
-// in AP mode). fetchGateway and fetchWifi each own one flag; this reconciles both.
-function updateRebuildBtn() {
-  const rb = document.getElementById('gwrebuild');
-  if (!rb) return;
-  rb.disabled = !!rb.dataset.rebuilding || rb.dataset.nonet === '1';
-  rb.title = rb.dataset.nonet === '1' ? 'Needs internet — switch Wi-Fi to Client mode first' : '';
+// Fetch/build/pull buttons need internet (blocked while Wi-Fi is in AP mode); build buttons
+// are also blocked while a build runs. fetchWifi and fetchGateway each own one flag.
+let GW_NONET = false, GW_BUILDING = false, GW_SF = {}, GW_REGAPP_REV = null;
+function updateNetBtns() {
+  document.querySelectorAll('button.needsnet').forEach(b => {
+    b.disabled = GW_NONET || (GW_BUILDING && b.classList.contains('buildbtn'));
+    b.title = GW_NONET ? 'Needs internet: switch Wi-Fi to Client mode first' : '';
+  });
+}
+function ago(epoch) {
+  const s = Date.now() / 1000 - epoch;
+  return s < 90 ? 'just now' : dur(s) + ' ago';
+}
+// pinned commit vs registry image vs the remote branch head (after Fetch)
+function renderSeafrontSrc() {
+  const el = document.getElementById('sfsrc'); if (!el) return;
+  const p = GW_SF.pinned, r = GW_SF.remote, img = GW_REGAPP_REV;
+  const s8 = x => (x || '?').slice(0, 8);
+  let t = 'pinned ' + s8(p);
+  if (p && img) t += (s8(img) === s8(p)) ? ' (= registry)' : ' (registry is ' + s8(img) + ')';
+  t += r ? ' · newest on GitHub ' + s8(r.sha) + ' (' + ago(r.at) + ')' : ' · GitHub: not fetched';
+  el.textContent = t;
+}
+async function postJson(url) {
+  const r = await fetch(url, {method: 'POST'});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.detail || ('HTTP ' + r.status));
+  return j;
+}
+async function gatewayFetch() {
+  toast('gateway: git fetch…');
+  try { await postJson('/api/gateway/fetch'); toast('gateway: fetched'); }
+  catch (e) { toast('gateway fetch failed: ' + e.message); }
+  fetchGateway();
+}
+async function seafrontFetch() {
+  toast('seafront: looking up the newest commit…');
+  try { const j = await postJson('/api/seafront/fetch'); GW_SF.remote = j; renderSeafrontSrc(); toast('seafront: newest is ' + j.sha.slice(0, 8)); }
+  catch (e) { toast('seafront fetch failed: ' + e.message); }
+}
+async function gatewayBuild(target) {
+  const ref = target === 'seafront' ? (document.getElementById('gwref').value || '').trim() : '';
+  const what = target === 'os' ? 'the OS image from the current checkout'
+    : 'the seafront image at ' + (ref ? '"' + ref + '"' : 'the pinned commit');
+  if (!confirm('Build ' + what + ' and push it to the registry?\\n\\nNo box is touched. Takes a few minutes.')) return;
+  openModal('Gateway: build ' + (target === 'os' ? 'OS image' : 'seafront image' + (ref ? ' @ ' + ref : '')));
+  const url = '/api/gateway/build?target=' + target + (ref ? '&seafront_ref=' + encodeURIComponent(ref) : '');
+  try { await postJson(url); }
+  catch (e) { document.getElementById('modalbody').textContent = 'error: ' + e.message; return; }
+  fetchGateway();
+  pollGatewayJob();
 }
 async function fetchWifi() {
   try {
@@ -1832,8 +1965,7 @@ async function fetchWifi() {
     document.getElementById('gwwifi').textContent = s;
     document.getElementById('wifiap').disabled = (w.mode === 'ap');
     document.getElementById('wificlient').disabled = (w.mode === 'client' && net);
-    const rb = document.getElementById('gwrebuild');
-    if (rb) { rb.dataset.nonet = net ? '' : '1'; updateRebuildBtn(); }
+    GW_NONET = !net; updateNetBtns();
   } catch (e) { /* leave last-known */ }
 }
 async function setWifi(mode) {
@@ -1907,25 +2039,6 @@ function changeIp(name) {
   startJob(name, 'set-ip', 'set-ip', {body: {ip}, confirmMsg:
     'Renumber ' + name + ' to ' + ip + '?\\n\\nApplies the new IP over SSH (keeps the old address until the new one is confirmed, auto-reverts on failure), then re-points the proxy. Runs in the background (~30s).'});
 }
-async function gatewayRebuild() {
-  const ref = (document.getElementById('gwref').value || '').trim();
-  const msg = ref
-    ? `Rebuild the seafront image at "${ref}" and push to the registry?\\n\\n(seafront only — OS image skipped. No box is touched.)`
-    : 'Fetch latest git + rebuild BOTH images on the gateway?\\n\\nUpdates the registry only — no box is touched. Takes several minutes.';
-  if (!confirm(msg)) return;
-  openModal(ref ? ('Gateway — rebuild seafront @ ' + ref) : 'Gateway — fetch git + rebuild images');
-  let r;
-  const url = '/api/gateway/update' + (ref ? ('?seafront_ref=' + encodeURIComponent(ref)) : '');
-  try { r = await fetch(url, {method: 'POST'}); }
-  catch (e) { document.getElementById('modalbody').textContent = 'request failed: ' + e; return; }
-  if (!r.ok) {
-    const j = await r.json().catch(() => ({}));
-    document.getElementById('modalbody').textContent = 'error: ' + (j.detail || r.status);
-    return;
-  }
-  fetchGateway();
-  pollGatewayJob();
-}
 async function pollGatewayJob() {
   const box = document.getElementById('modalbody');
   try {
@@ -1937,7 +2050,7 @@ async function pollGatewayJob() {
   } catch (e) { box.textContent += '\\npoll error: ' + e; }
 }
 async function gatewaySelfUpdate() {
-  if (!confirm('Update the gateway itself — git pull + apply (restarts the dashboard)?\\n\\nNot an image rebuild. The page reloads once the dashboard is back.')) return;
+  if (!confirm('Pull the gateway repo and apply it (restarts the dashboard)?\\n\\nDoes not build images. The page reloads once the dashboard is back.')) return;
   openModal('Gateway — update software');
   const box = document.getElementById('modalbody');
   box.textContent = 'pulling + applying… the dashboard will restart.';

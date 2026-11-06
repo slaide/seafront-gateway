@@ -138,7 +138,7 @@ AP is the day-to-day mode; flip to **client** only to rebuild/pull images (that 
 internet), then back. The switch runs detached and auto-reverts on failure, so toggling
 *over the Wi-Fi you are tearing down* cannot strand the gateway — the wired backbone
 (`192.168.50.1` / `squidway.local`) is always the way back in. The chosen mode persists
-across reboots (NetworkManager autoconnect). The dashboard's **rebuild** button is
+across reboots (NetworkManager autoconnect). The dashboard's fetch, pull and build buttons are
 disabled while in AP mode (no internet).
 
 ## Layout
