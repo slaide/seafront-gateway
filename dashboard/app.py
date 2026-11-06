@@ -505,8 +505,9 @@ _BOX_IMAGES_CMD = (
     "; echo '<<<SPLIT>>>'; "
     # clock: chrony's view (which server, synced?) + the box's wall clock, read LAST so it
     # is taken as close as possible to when the SSH call returns (see _parse_clock)
-    # (not `-c`: chrony 4.9 prints nothing in CSV mode over this ssh, still exit 0)
-    "chronyc -n tracking 2>/dev/null"
+    # `| cat`: with its stdout directly on the ssh channel, chronyc 4.9 prints nothing and
+    # exits 0 (any pipe works); that is also why `-c` once looked broken
+    "chronyc -n tracking 2>/dev/null | cat"
     "; echo '<<<SPLIT>>>'; "
     "date +%s.%N"
 )
