@@ -45,6 +45,7 @@ systemctl restart caddy   # Caddy is a podman quadlet container — restart, not
 if command -v firewall-cmd >/dev/null; then
   CONFIGURED="$($FC all-ports)"   # dashboard_port + every proxy_port, one per line
   firewall-cmd --permanent --add-service=ssh >/dev/null 2>&1 || true
+  firewall-cmd --permanent --add-service=ntp >/dev/null 2>&1 || true   # boxes sync time here
   for p in $CONFIGURED 5000; do
     firewall-cmd --permanent --add-port="$p/tcp" >/dev/null 2>&1 || true
   done

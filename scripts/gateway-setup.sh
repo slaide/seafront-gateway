@@ -92,6 +92,25 @@ pharmbio ALL=(root) NOPASSWD: /usr/sbin/reboot, /usr/bin/systemctl reboot, $DIR/
 EOF
 sudo visudo -cf /etc/sudoers.d/seafront-gateway
 
+echo "==> time server for the backbone (boxes sync to this gateway, see images/kinoite/files/etc/chrony.conf)"
+# Upstream pool when the gateway has internet (Wi-Fi client mode); otherwise `local
+# stratum 10` keeps serving the gateway's own clock, so the boxes still agree with each
+# other. Fedora's chrony has no /etc/chrony.d include, so write the whole file.
+BACKBONE_NET=$(python3 "$DIR/scripts/fleet_config.py" get gateway.backbone.subnet)
+sudo install -m 0644 /dev/stdin /etc/chrony.conf <<EOF
+pool 2.fedora.pool.ntp.org iburst
+local stratum 10
+allow $BACKBONE_NET
+driftfile /var/lib/chrony/drift
+makestep 1.0 3
+rtcsync
+ntsdumpdir /var/lib/chrony
+leapseclist /usr/share/zoneinfo/leap-seconds.list
+logdir /var/log/chrony
+EOF
+sudo systemctl enable chronyd
+sudo systemctl restart chronyd
+
 echo "==> remote management: enable sshd so the gateway is reachable over ssh"
 # Kinoite ships sshd OFF by default (images/kinoite/Containerfile enables it on the boxes
 # for the same reason). The gateway needs it too, or there is no way in over the network.
@@ -100,6 +119,7 @@ sudo systemctl enable --now sshd
 echo "==> firewall: open ssh + registry + dashboard + proxy ports (Kinoite runs firewalld)"
 if command -v firewall-cmd >/dev/null; then
     sudo firewall-cmd --permanent --add-service=ssh >/dev/null
+    sudo firewall-cmd --permanent --add-service=ntp >/dev/null
     PORTS=$(python3 -c "import json;d=json.load(open('$DIR/config/microscopes.json'));print(5000);print(d['gateway']['dashboard_port']);[print(m['proxy_port']) for m in d['microscopes']]")
     for p in $PORTS; do sudo firewall-cmd --permanent --add-port="$p/tcp" >/dev/null; done
     sudo firewall-cmd --reload
