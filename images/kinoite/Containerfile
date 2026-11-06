@@ -26,6 +26,9 @@ FROM quay.io/fedora-ostree-desktops/kinoite:44@sha256:b46719aad9beb6da5126a264c4
 # podman is present on Kinoite; add nothing unless required. Layer extras here if a
 # box needs them, e.g.:  RUN rpm-ostree install --idempotent firefox
 # (Firefox ships with Kinoite; if your base lacks it, uncomment the line above.)
+# less + micro: pager and terminal editor for working on a box over ssh. Kept above
+# `COPY files/` so editing the files tree does not redo this layer.
+RUN dnf -y install less micro && dnf clean all
 
 # --- baked configuration (see files/ tree) ---
 COPY files/ /

@@ -7,6 +7,8 @@ Wants=network-online.target
 
 [Container]
 Image=10.10.0.69:5000/seafront:stable
+# Without this quadlet names it `systemd-seafront`; keep `podman exec seafront ...` working.
+ContainerName=seafront
 PublishPort=8000:8000
 # Persistent state on the writable host partition (survives OS upgrades).
 # config.json is pushed here by the gateway (scripts/push-config.sh); images land here too.
