@@ -1,0 +1,17 @@
+# Reset image-owned files in /etc to the image's version on every boot, before anything
+# that reads them starts. See /usr/bin/seafront-etc-sync for why bootc needs this.
+[Unit]
+Description=Reset image-owned /etc files to the OS image's version
+DefaultDependencies=no
+After=local-fs.target
+# Not Before=systemd-udevd: udev must run before local-fs, so that would be a cycle. A
+# reset udev rule is applied by `udevadm control --reload` in the script instead.
+Before=sysinit.target seafront.service sshd.service chronyd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/seafront-etc-sync
+
+[Install]
+WantedBy=sysinit.target

@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Keep every file this OS image ships under /etc identical to the image's copy.
+#
+# bootc replaces /usr on upgrade but 3-way-merges /etc: a file that differs from the old
+# image's default counts as a local admin edit and is KEPT across every later upgrade.
+# One hand edit (e.g. the July 2026 registry repoint) silently freezes that file on the
+# box while the dashboard reports the box "up to date". The image's pristine copy is in
+# /usr/etc; the list of files the image owns is generated at build time (Containerfile).
+# Per-box state (hostname, NetworkManager connections, ssh host keys, users) is not on
+# the list and is never touched.
+#
+#   seafront-etc-sync           reset drifted files (boot: seafront-etc-sync.service)
+#   seafront-etc-sync --check   print drifted paths, change nothing (the dashboard)
+set -euo pipefail
+LIST=/usr/share/seafront/managed-etc.list
+[ -r "$LIST" ] || { echo "missing $LIST" >&2; exit 2; }
+
+check=0
+[ "${1:-}" = --check ] && check=1
+
+changed=()
+while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    src="/usr/etc/$f" dst="/etc/$f"
+    [ -e "$src" ] || continue
+    if ! cmp -s "$src" "$dst" \
+        || [ "$(stat -c %a:%u:%g "$src")" != "$(stat -c %a:%u:%g "$dst" 2>/dev/null)" ]; then
+        if [ "$check" = 1 ]; then
+            echo "$f"
+        else
+            mkdir -p "$(dirname "$dst")"
+            cp -a "$src" "$dst"
+            restorecon -F "$dst" 2>/dev/null || true
+            echo "seafront-etc-sync: reset /etc/$f to the image's version"
+            changed+=("$f")
+        fi
+    fi
+done < "$LIST"
+
+[ "$check" = 1 ] && exit 0
+[ "${#changed[@]}" -gt 0 ] || exit 0
+
+# At boot this runs before seafront/sshd start, so the reload is all that's needed. When
+# run by hand on a live box, also apply it to what is already running.
+systemctl daemon-reload
+for f in "${changed[@]}"; do
+    case "$f" in
+        containers/*)     systemctl try-restart seafront.service ;;
+        ssh/*)            systemctl try-reload-or-restart sshd.service ;;
+        chrony.conf)      systemctl try-restart chronyd.service ;;
+        udev/*)           udevadm control --reload ;;
+    esac
+done

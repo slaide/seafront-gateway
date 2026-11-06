@@ -1,6 +1,7 @@
 # Narrow, passwordless rule so the gateway (SSHing in as pharmbio with the fleet key)
 # can drive this box — and nothing else. Covers the dashboard's image reads, both
-# update routes (OS via bootc, app via podman), app restart, reboot, and central
+# update routes (OS via bootc, app via podman), app restart, reboot, /etc drift
+# check/reset (seafront-etc-sync), and central
 # renumbering (nmcli — broad on purpose: the gateway already has full control of the
 # box over this trusted backbone, so scoping nmcli further buys nothing).
 #
@@ -25,4 +26,6 @@ pharmbio ALL=(root) NOPASSWD: \
     /usr/bin/nmcli connection modify *, \
     /usr/bin/nmcli connection up *, \
     /usr/bin/nmcli device reapply *, \
+    /usr/bin/seafront-etc-sync --check, \
+    /usr/bin/seafront-etc-sync, \
     /usr/sbin/reboot

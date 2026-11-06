@@ -314,6 +314,15 @@ def _parse_app(text: str) -> dict:
             "revision": labels.get("org.opencontainers.image.revision")}
 
 
+def _parse_drift(text: str) -> list[str] | None:
+    """`seafront-etc-sync --check` output -> drifted /etc paths, or None when the check
+    could not run (box image predates it, or sudo refused)."""
+    lines = [l.strip() for l in text.strip().splitlines() if l.strip()]
+    if not lines or lines[-1] != "rc=0":
+        return None
+    return lines[:-1]
+
+
 # List the profile names in the box's config.json (no sudo — pharmbio owns it). Single
 # argv element / single-quoted python so ssh's space-join + remote re-parse keep it intact.
 _LIST_PROFILES_CMD = (
@@ -334,6 +343,10 @@ _BOX_IMAGES_CMD = (
     f"{_LIST_PROFILES_CMD}"
     "; echo '<<<SPLIT>>>'; "
     "cat ~/seafront/active_microscope 2>/dev/null"
+    "; echo '<<<SPLIT>>>'; "
+    # image-owned /etc files that differ from the image (bootc keeps local edits across
+    # upgrades); rc line distinguishes "no drift" from "check unavailable" (older image)
+    "sudo -n /usr/bin/seafront-etc-sync --check 2>/dev/null; echo \"rc=$?\""
 )
 
 
@@ -368,8 +381,11 @@ async def _box_images(name: str) -> dict:
     app_part = parts[1] if len(parts) > 1 else ""
     prof_part = parts[2] if len(parts) > 2 else ""
     active_part = parts[3] if len(parts) > 3 else ""
+    drift_part = parts[4] if len(parts) > 4 else ""
     profiles = [p.strip() for p in prof_part.splitlines() if p.strip()]
-    result = {"name": name, "os": _parse_bootc(os_part), "seafront": _parse_app(app_part),
+    os_info = _parse_bootc(os_part)
+    os_info["etc_drift"] = _parse_drift(drift_part)
+    result = {"name": name, "os": os_info, "seafront": _parse_app(app_part),
               "microscopes": profiles, "active": active_part.strip() or None}
     _LAST_BOX_IMAGES[name] = (copy.deepcopy(result), time.monotonic())
     return {**result, "stale_seconds": 0}
@@ -387,7 +403,10 @@ async def images() -> JSONResponse:
     for b in boxes:
         osd, appd = b["os"], b["seafront"]
         rd = reg_os.get("digest")
-        osd["up_to_date"] = bool(osd.get("digest") and rd and osd["digest"] == rd)
+        # "Up to date" means the box runs the image's config too: an image-owned /etc file
+        # with local edits is kept by bootc across upgrades, so a digest match alone lies.
+        osd["up_to_date"] = bool(osd.get("digest") and rd and osd["digest"] == rd
+                                 and osd.get("etc_drift") == [])
         osd["staged_latest"] = bool(osd.get("staged_digest") and rd and osd["staged_digest"] == rd)
         ad = reg_app.get("digest")
         appd["up_to_date"] = bool(appd.get("digest") and ad and appd["digest"] == ad)
@@ -1132,8 +1151,14 @@ function osLine(o, reg) {
   let badge = '';
   if (o.staged_latest) badge = ' <span class="staged">staged ' + (ftime(reg && reg.created) || o.staged_version || '') + ' — reboot to apply</span>';
   else if (o.up_to_date) badge = ' <span class="ok">up to date</span>';
+  else if (reg && reg.digest && o.digest === reg.digest) badge = ' <span class="stale">image current, config not</span>';
   else if (reg && reg.digest) badge = ' <span class="stale">update → ' + (ftime(reg.created) || reg.version || short(reg.digest)) + '</span>';
-  return 'OS ' + v + (t ? ' · ' + t : '') + ' · ' + short(o.digest) + badge;
+  let drift = '';
+  if (o.etc_drift === null || o.etc_drift === undefined)
+    drift = '<br><span class="stale">⚠ /etc drift: cannot check (OS image predates seafront-etc-sync)</span>';
+  else if (o.etc_drift.length)
+    drift = '<br><span class="stale">⚠ /etc differs from image (reboot or <code>sudo seafront-etc-sync</code>): ' + o.etc_drift.join(', ') + '</span>';
+  return 'OS ' + v + (t ? ' · ' + t : '') + ' · ' + short(o.digest) + badge + drift;
 }
 function appLine(a, reg) {
   if (!a || a.present === false) return '<span class="muted">seafront image: not present</span>';
@@ -1545,7 +1570,8 @@ async function refresh() {
     const hs = m.host_up ? 'up' : 'down', ss = m.service_up ? 'up' : 'down';
     const img = IMAGES.boxes[m.name] || {};
     const osd = img.os || {}, appd = img.seafront || {};
-    const osStale = osd.available && !osd.up_to_date && !osd.staged_latest && (IMAGES.registry.os || {}).digest;
+    const regOs = (IMAGES.registry.os || {}).digest;
+    const osStale = osd.available && regOs && osd.digest !== regOs && !osd.staged_latest;
     const appStale = appd.present && !appd.up_to_date && (IMAGES.registry.seafront || {}).digest;
     const job = BOXJOBS[m.name];
     const jobRunning = !!(job && job.running);

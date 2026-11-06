@@ -41,6 +41,7 @@ COPY fleet.pub /etc/ssh/authorized_keys.d/pharmbio
 # the baked scripts must be executable.
 RUN chmod 0440 /etc/sudoers.d/seafront-fleet \
     && chmod 0755 /usr/bin/box-postinstall /usr/bin/seafront-kiosk /usr/bin/seafront-run \
+                  /usr/bin/seafront-etc-sync \
     && chmod 0644 /etc/ssh/authorized_keys.d/pharmbio
 
 # Enable remote management + open the ports. Without these the gateway cannot reach
@@ -52,6 +53,15 @@ RUN systemctl enable sshd.service
 # ttyACM node, regenerates the quadlet + restarts seafront so the serial device is attached
 # (quadlet's optional-device check runs too early at boot to see it). See the unit's header.
 RUN systemctl enable seafront-hardware-prep.service
+# Every file this image ships under /etc (the files/etc tree + the baked fleet key). On each
+# boot seafront-etc-sync.service resets any of them that differ from the image's copy:
+# bootc keeps a locally edited /etc file across upgrades, which froze the quadlet,
+# registry trust and sshd drop-in on every box from July until Nov 2026.
+RUN --mount=type=bind,source=files/etc,target=/tmp/managed-etc \
+    mkdir -p /usr/share/seafront \
+    && { find /tmp/managed-etc -type f -printf '%P\n'; echo ssh/authorized_keys.d/pharmbio; } \
+       | sort > /usr/share/seafront/managed-etc.list \
+    && systemctl enable seafront-etc-sync.service
 # separate invocations: firewall-offline-cmd rejects --add-service + --add-port together.
 RUN firewall-offline-cmd --add-service=ssh && firewall-offline-cmd --add-port=8000/tcp
 
