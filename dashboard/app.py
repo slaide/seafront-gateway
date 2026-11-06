@@ -1277,9 +1277,8 @@ HTML = """<!doctype html>
   .card { background: #161b22; border: 1px solid #30363d; border-radius: 12px;
           padding: 18px; display: flex; flex-direction: column; gap: 10px; }
   .cardhead { display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; }
-  .chev { color: #8b949e; width: 1em; transition: transform .12s; }
-  .card:not(.collapsed) .chev { transform: rotate(90deg); }
-  .card.collapsed { padding: 12px 16px; gap: 6px; }
+  .chev { color: #8b949e; margin-left: auto; transition: transform .12s; }
+  .card.collapsed .chev { transform: rotate(90deg); }
   .card.collapsed .cardbody { display: none; }
   .cardbody { display: flex; flex-direction: column; gap: 10px; }
   .badge { font-size: .7rem; padding: 1px 8px; border-radius: 999px; border: 1px solid #bb8009;
@@ -2189,13 +2188,13 @@ async function refresh() {
     }
     card.innerHTML = `
       <div class="cardhead" onclick="toggleCard('${m.name}')">
-        <span class="chev">▸</span><span class="name">${m.name}</span>${badges}
+        <span class="name">${m.name}</span>${badges}<span class="chev">▾</span>
       </div>
       <div class="signals">
         <div class="sig"><span class="dot ${hs}"></span>Computer: ${m.host_up ? 'online' : 'offline'}${m.host_up && up != null ? ' <span class="muted">· up ' + dur(up) + '</span>' : ''}</div>
         <div class="sig"><span class="dot ${ss}"></span>seafront: ${m.service_up ? 'running' : 'down'}</div>
       </div>
-      <div class="meta">${m.host}:${m.seafront_port} · <a class="repolink" href="${url}">via gateway :${m.proxy_port}</a></div>
+      <div class="meta"><a class="repolink" href="http://${m.host}:${m.seafront_port}/">${m.host}:${m.seafront_port}</a> · <a class="repolink" href="${url}">via gateway :${m.proxy_port}</a></div>
       <div class="cardbody">
       <div class="ver">${osLine(osd, IMAGES.registry.os)}</div>
       <div class="ver">${appLine(appd, IMAGES.registry.seafront)}</div>
