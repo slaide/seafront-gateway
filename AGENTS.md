@@ -90,7 +90,8 @@ is identical across the fleet.
 External storage: the container sees the host's `/mnt` (= `/var/mnt`) at both paths, with
 `rslave` propagation and SELinux confinement off (`SecurityLabelDisable`), so a drive, sshfs or
 NFS mounted there later is usable without a `context=` option. A T7 SSD (label `T7`)
-auto-mounts at `/mnt/t7` (`var-mnt-t7.mount`).
+auto-mounts at `/mnt/t7`: `var-mnt-t7.mount` when plugged in later, `t7-mount-at-boot.service`
+when already plugged in at boot.
 
 `sudo seafront-run [cmd]` on a box starts a throwaway container from the seafront image with
 the same device passthrough, for hardware checks without touching the service.

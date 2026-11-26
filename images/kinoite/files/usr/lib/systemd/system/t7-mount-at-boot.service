@@ -1,0 +1,17 @@
+# Mounts a T7 SSD that is already plugged in at boot.
+#
+# var-mnt-t7.mount is wanted by the drive's device unit, which starts it when the drive is
+# plugged into a running box. A drive present at boot is enumerated during systemd's own
+# startup, and that does not start what the device wants: on squid1 (2026-11-26) the device
+# came up active and the mount stayed dead. The condition skips this when no T7 is plugged in;
+# pulling the mount in with Wants= instead would make it wait for the absent drive and fail.
+[Unit]
+Description=Mount a T7 SSD plugged in at boot
+ConditionPathExists=/dev/disk/by-label/T7
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl start --no-block var-mnt-t7.mount
+
+[Install]
+WantedBy=multi-user.target
