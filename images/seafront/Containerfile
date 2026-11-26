@@ -23,7 +23,7 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 ARG SEAFRONT_REPO=https://github.com/slaide/seafront.git
 # Pinned for reproducibility. scripts/build-images.sh is the source of truth and passes
 # the pinned SHA via --build-arg; keep this default in sync with it when bumping.
-ARG SEAFRONT_REF=3f0826e4a41c4c2109a043cdcf276703b5dd7978
+ARG SEAFRONT_REF=b23c24cafaf151216cdd4569e0be052d371e0863
 RUN git clone "$SEAFRONT_REPO" /app \
     && git -C /app checkout "$SEAFRONT_REF"
 # The seafront commit baked in, readable from the registry and `podman image inspect` on a
