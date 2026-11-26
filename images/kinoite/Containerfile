@@ -53,6 +53,8 @@ RUN systemctl enable sshd.service
 # ttyACM node, regenerates the quadlet + restarts seafront so the serial device is attached
 # (quadlet's optional-device check runs too early at boot to see it). See the unit's header.
 RUN systemctl enable seafront-hardware-prep.service
+# Mount a plugged-in T7 SSD at /mnt/t7 (see the unit).
+RUN systemctl enable var-mnt-t7.mount
 # Every file this image ships under /etc (the files/etc tree + the baked fleet key). On each
 # boot seafront-etc-sync.service resets any of them that differ from the image's copy:
 # bootc keeps a locally edited /etc file across upgrades, which froze the quadlet,

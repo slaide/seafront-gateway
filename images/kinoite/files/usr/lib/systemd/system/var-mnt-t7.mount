@@ -1,0 +1,16 @@
+# External Samsung T7 SSD (factory label "T7"), mounted at /mnt/t7 (= /var/mnt/t7) whenever
+# it is plugged in, at boot or later. seafront sees it there through its /mnt volume.
+[Unit]
+Description=external T7 SSD at /mnt/t7
+BindsTo=dev-disk-by\x2dlabel-T7.device
+After=dev-disk-by\x2dlabel-T7.device
+
+[Mount]
+What=/dev/disk/by-label/T7
+Where=/var/mnt/t7
+Type=exfat
+# pharmbio (uid 1000) owns the files for ssh/desktop use; seafront runs as root
+Options=nofail,uid=1000,gid=1000
+
+[Install]
+WantedBy=dev-disk-by\x2dlabel-T7.device

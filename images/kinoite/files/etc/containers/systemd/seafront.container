@@ -13,6 +13,15 @@ PublishPort=8000:8000
 # Persistent state on the writable host partition (survives OS upgrades).
 # config.json is pushed here by the gateway (scripts/push-config.sh); images land here too.
 Volume=/home/pharmbio/seafront:/root/seafront:z
+# Storage outside the box: anything mounted under /mnt (= /var/mnt on the host), e.g. the
+# T7 SSD (var-mnt-t7.mount), sshfs or NFS, is visible at both spellings. rslave passes in
+# mounts made after the container started.
+Volume=/var/mnt:/var/mnt:rslave
+Volume=/var/mnt:/mnt:rslave
+# Such a mount's files carry their filesystem's SELinux label (exFAT: dosfs_t, FUSE:
+# fusefs_t), which container_t may not open. Rather than require a context= option on every
+# mount, the container runs unconfined; it is root with all of /dev already.
+SecurityLabelDisable=true
 # SEAFRONT_HOME must equal $HOME/seafront (=/root/seafront) — see the app Containerfile.
 Environment=SEAFRONT_HOME=/root/seafront
 # Profile to run from config.json. Flip to the real profile once hardware is wired.
