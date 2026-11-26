@@ -15,7 +15,7 @@ SEAFRONT_REPO="${SEAFRONT_REPO:-https://github.com/slaide/seafront.git}"
 # commit + this SHA + seafront's committed uv.lock fully determine the app image. Keep it
 # on a hardware-verified commit; bump it to roll the fleet forward. For testing, override
 # SEAFRONT_REF=<sha|branch|tag|latest> (the dashboard exposes a field) — no gateway commit.
-REF="${SEAFRONT_REF:-31b82d3f2ce2e8ee35d7273d0b0798be11990ebb}"
+REF="${SEAFRONT_REF:-28d65b7cfe7a3161740dbb3757c9b3ee9283ab5f}"
 
 # Resolve a symbolic ref (branch / tag / "latest" / "HEAD") to a concrete commit SHA; a
 # SHA (full or abbreviated) is used as-is. This keeps the build reproducible AND makes the
